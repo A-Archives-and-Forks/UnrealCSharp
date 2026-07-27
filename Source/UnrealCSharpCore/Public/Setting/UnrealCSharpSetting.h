@@ -76,6 +76,8 @@ enum class EScriptDomainType : uint8
 {
 	Mono,
 	CoreCLR,
+	// Third script backend (leanclr: from-scratch IL interpreter + GC). Appended to keep serialized ordinals stable.
+	LeanCLR,
 };
 
 /**
@@ -155,10 +157,16 @@ private:
 	UPROPERTY(Config, EditAnywhere, Category = Domain)
 	EScriptDomainType MacScriptDomainType;
 
-	UPROPERTY(Config, VisibleAnywhere, Category = Domain)
+	// Android supports Mono (default) and LeanCLR (P7.7). CoreCLR has no Android target, so the
+	// details-panel dropdown is restricted to those two via ValidEnumValues. Default stays Mono
+	// (ctor); pick LeanCLR here or via AndroidScriptDomainType=LeanCLR in DefaultUnrealCSharpSetting.ini.
+	UPROPERTY(Config, EditAnywhere, Category = Domain, meta = (ValidEnumValues = "Mono, LeanCLR"))
 	EScriptDomainType AndroidScriptDomainType;
 
-	UPROPERTY(Config, VisibleAnywhere, Category = Domain)
+	// iOS likewise supports only Mono (default) and LeanCLR; CoreCLR has no iOS target. Dropdown
+	// restricted via ValidEnumValues. NOTE: the iOS LeanCLR static lib is not delivered yet (P7.8) —
+	// selecting LeanCLR here will not link until that lands.
+	UPROPERTY(Config, EditAnywhere, Category = Domain, meta = (ValidEnumValues = "Mono, LeanCLR"))
 	EScriptDomainType IOSScriptDomainType;
 
 	UPROPERTY(Config, EditAnywhere, Category = Domain)

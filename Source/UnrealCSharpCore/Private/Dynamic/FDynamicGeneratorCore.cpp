@@ -895,6 +895,16 @@ void FDynamicGeneratorCore::GeneratorProperty(const FClassReflection* InClassRef
 		return;
 	}
 
+#if WITH_LEANCLR
+	const bool bLeanCLRPropProbe = InClassReflection->GetName().Contains(TEXT("RawDynamicProperty"));
+
+	if (bLeanCLRPropProbe)
+	{
+		UE_LOG(LogUnrealCSharp, Warning, TEXT("[P6.1 genprop] class=%s GetProperties=%d"),
+		       *InClassReflection->GetName(), InClassReflection->GetProperties().Num());
+	}
+#endif
+
 	for (const auto& [Name, Property] : InClassReflection->GetProperties())
 	{
 		if (Property != nullptr)
@@ -905,12 +915,27 @@ void FDynamicGeneratorCore::GeneratorProperty(const FClassReflection* InClassRef
 					Property->GetReflectionType(), InField, FName(Name),
 					EObjectFlags::RF_Public);
 
+#if WITH_LEANCLR
+				if (bLeanCLRPropProbe)
+				{
+					UE_LOG(LogUnrealCSharp, Warning,
+					       TEXT("[P6.1 genprop] %s isUProp=1 factory=%s"),
+					       *Name, CppProperty != nullptr ? TEXT("OK") : TEXT("NULL"));
+				}
+#endif
+
 				SetFlags(CppProperty, Property);
 
 				InField->AddCppProperty(CppProperty);
 
 				InGenerator(Property, CppProperty);
 			}
+#if WITH_LEANCLR
+			else if (bLeanCLRPropProbe)
+			{
+				UE_LOG(LogUnrealCSharp, Warning, TEXT("[P6.1 genprop] %s isUProp=0 (skipped)"), *Name);
+			}
+#endif
 		}
 	}
 }

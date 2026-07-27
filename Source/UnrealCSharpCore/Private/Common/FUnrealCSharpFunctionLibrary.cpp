@@ -1029,6 +1029,13 @@ FString FUnrealCSharpFunctionLibrary::GetFullInteropPublishPath()
 #elif WITH_MONO
 	return FPaths::ConvertRelativePathToFull(
 		FUnrealCSharpFunctionLibrary::GetFullPublishDirectory() / (INTEROP_NAME + DLL_SUFFIX));
+#elif PLATFORM_ANDROID
+	// FPlatformProcess::ExecutablePath() is not implemented on Android and fatal-errors, and
+	// GetBinariesSubdirectory() returns "" there. Resolve from the project dir with the fixed
+	// "Android" segment (matches FLeanCLRFunctionLibrary's Android corlib path).
+	return FPaths::ConvertRelativePathToFull(
+		FString::Printf(TEXT("%s/Binaries/Android"), *FPaths::ProjectDir())
+		/ (INTEROP_NAME + DLL_SUFFIX));
 #else
 	return FPaths::ConvertRelativePathToFull(
 		FPaths::GetPath(FPlatformProcess::ExecutablePath()) / (INTEROP_NAME + DLL_SUFFIX));

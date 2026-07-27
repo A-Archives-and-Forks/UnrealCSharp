@@ -2,6 +2,10 @@
 #include "Domain/FDomain.h"
 #include "Dynamic/FDynamicClassGenerator.h"
 #include "Environment/FCSharpEnvironment.h"
+#if WITH_LEANCLR
+#include "Log/UnrealCSharpLog.h"
+#include "UObject/UnrealType.h"
+#endif
 
 TMap<TWeakObjectPtr<UClass>, UClass::ClassConstructorType> FClassRegistry::ClassConstructorMap;
 
@@ -227,7 +231,50 @@ void FClassRegistry::ClassConstructor(const FObjectInitializer& InObjectInitiali
 
 				if (const auto FoundClass = FReflectionRegistry::Get().GetClass(Object->GetClass()))
 				{
+#if WITH_LEANCLR
+					// [P6.1 ctor-readback @ClassRegistry] The spawn-instance ctor may funnel here rather than
+					// through OnPostClassConstructor. Read Int32Value off the native UObject before/after the
+					// ctor to see whether the C# ctor's setter write reaches this instance. If Int32Value
+					// isn't found, dump the class + property names so we learn the real generated naming.
+					const bool bLeanCLRProbe = Object->GetClass()->GetName().Contains(TEXT("RawDynamic"));
+
+					const FIntProperty* Int32Probe = bLeanCLRProbe
+						                                  ? CastField<FIntProperty>(
+							                                  Object->GetClass()->FindPropertyByName(TEXT("Int32Value")))
+						                                  : nullptr;
+
+					if (bLeanCLRProbe && Int32Probe == nullptr)
+					{
+						FString PropNames;
+
+						for (TFieldIterator<FProperty> It(Object->GetClass()); It; ++It)
+						{
+							PropNames += It->GetName() + TEXT(",");
+						}
+
+						UE_LOG(LogUnrealCSharp, Warning,
+						       TEXT("[P6.1 ctor-readback @ClassRegistry] class=%s NO Int32Value; props=[%s]"),
+						       *Object->GetClass()->GetName(), *PropNames);
+					}
+
+					if (Int32Probe != nullptr)
+					{
+						UE_LOG(LogUnrealCSharp, Warning,
+						       TEXT("[P6.1 ctor-readback @ClassRegistry] class=%s BEFORE Int32Value=%d"),
+						       *Object->GetClass()->GetName(), Int32Probe->GetPropertyValue_InContainer(Object));
+					}
+#endif
+
 					FoundClass->ConstructorObject(FoundManagedHandle);
+
+#if WITH_LEANCLR
+					if (Int32Probe != nullptr)
+					{
+						UE_LOG(LogUnrealCSharp, Warning,
+						       TEXT("[P6.1 ctor-readback @ClassRegistry] class=%s AFTER  Int32Value=%d"),
+						       *Object->GetClass()->GetName(), Int32Probe->GetPropertyValue_InContainer(Object));
+					}
+#endif
 				}
 			}
 		}

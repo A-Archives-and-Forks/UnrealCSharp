@@ -204,6 +204,52 @@ namespace Script.CoreUObject
 
                 var PropertyAttributeValues = new List<string>();
 
+#if LEANCLR
+                var LeanCLRWovenFieldNames = new HashSet<string>();
+
+                var LeanCLRWovenAttrFields = new Dictionary<string, FieldInfo>();
+
+                try
+                {
+                    var AllFields = InType.GetFields(
+                        BindingFlags.Static | BindingFlags.Instance |
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.FlattenHierarchy);
+
+                    var DunderPropCount = 0;
+                    foreach (var Field in AllFields)
+                    {
+                        // StringComparison.Ordinal is mandatory here, do not simplify it away:
+                        // the culture-sensitive overloads route through Win32 NLS, which leanclr
+                        // only implements on Windows. On POSIX targets (Android/Linux/Mac/iOS)
+                        // FindNLSStringEx returns -1 unconditionally, so they silently return
+                        // false and every woven UProperty marker is lost.
+                        if (Field != null && Field.Name.StartsWith("__", StringComparison.Ordinal))
+                        {
+                            if (Field.Name.EndsWith("_Attrs", StringComparison.Ordinal))
+                            {
+                                LeanCLRWovenAttrFields[Field.Name] = Field;
+                            }
+                            else
+                            {
+                                DunderPropCount++;
+                                LeanCLRWovenFieldNames.Add(Field.Name);
+                            }
+                        }
+                    }
+                    Console.WriteLine($"[LEANCLR fields] {InType.Name} total={AllFields.Length} __props={DunderPropCount} __attrs={LeanCLRWovenAttrFields.Count}");
+                }
+                catch
+                {
+                    // Never let field discovery abort the property parse.
+                }
+
+                // Cache the UE assembly once for Type resolution from attribute full names.
+                Assembly UEAssembly = null;
+                try { UEAssembly = typeof(UClassAttribute).Assembly; }
+                catch { }
+#endif
+
                 for (var i = 0; i < OutPropertyInfos.Length; i++)
                 {
                     OutPropertyNames[i] = OutPropertyInfos[i].Name;
@@ -212,6 +258,76 @@ namespace Script.CoreUObject
 
                     var PropertyAttributeCount = 0;
 
+#if LEANCLR
+                    if (LeanCLRWovenFieldNames.Contains("__" + OutPropertyInfos[i].Name))
+                    {
+                        PropertyAttributes.Add(typeof(UPropertyAttribute));
+
+                        PropertyAttributeIndex.Add(0);
+
+                        PropertyAttributeCount++;
+                    }
+
+                    // Recover companion attributes from __<Name>_Attrs woven static string fields.
+                    if (LeanCLRWovenAttrFields.TryGetValue(
+                            "__" + OutPropertyInfos[i].Name + "_Attrs", out var AttrField))
+                    {
+                        string AttrData = null;
+
+                        try { AttrData = AttrField.GetValue(null) as string; }
+                        catch { /* skip this field on any read error */ }
+
+                        if (!string.IsNullOrEmpty(AttrData))
+                        {
+                            foreach (var Line in AttrData.Split('\n'))
+                            {
+                                if (string.IsNullOrEmpty(Line))
+                                {
+                                    continue;
+                                }
+
+                                var Parts = Line.Split('|');
+                                var TypeFullName = Parts[0];
+
+                                var AttrType = Type.GetType(TypeFullName);
+
+                                if (AttrType == null && UEAssembly != null)
+                                {
+                                    try
+                                    {
+                                        AttrType = UEAssembly.GetTypes()
+                                            .FirstOrDefault(t => t.FullName == TypeFullName);
+                                    }
+                                    catch
+                                    {
+                                        // skip on assembly scan error
+                                    }
+                                }
+
+                                if (AttrType == null)
+                                {
+                                    continue;
+                                }
+
+                                PropertyAttributes.Add(AttrType);
+
+                                var ValueCount = Parts.Length - 1;
+
+                                if (ValueCount > 0)
+                                {
+                                    for (var v = 1; v < Parts.Length; v++)
+                                    {
+                                        PropertyAttributeValues.Add(Parts[v]);
+                                    }
+                                }
+
+                                PropertyAttributeIndex.Add(ValueCount);
+
+                                PropertyAttributeCount++;
+                            }
+                        }
+                    }
+#else
                     foreach (var CustomAttribute in OutPropertyInfos[i].CustomAttributes)
                     {
                         if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace)
@@ -232,6 +348,7 @@ namespace Script.CoreUObject
                             PropertyAttributeCount++;
                         }
                     }
+#endif
 
                     OutPropertyAttributeCounts[i] = PropertyAttributeCount;
                 }
@@ -293,6 +410,89 @@ namespace Script.CoreUObject
             }
         }
 
+#if LEANCLR
+        // Diagnostic counters (LeanCLR-only): incremented by GetClassMethodsImplementation so the
+        // DumpMethodReflection probe can tell whether the per-method attribute workarounds actually
+        // RAN in the loaded UE.dll — not merely whether they were compiled in (a stale UE.dll is a
+        // real failure mode here, the editor recompiles it at startup).
+        private static int LeanCLRIsDefinedAttributeHitCount;
+#endif
+
+#if LEANCLR
+        // leanclr's Type.GetMethods does not collapse overridden virtual slots: an override and the
+        // base slot it overrides BOTH appear (runtime probe: 'Test' matches=2 / total=109 on
+        // UUnitTestSubsystem, vs CoreCLR's matches=1 / total=105 on the same Game.dll). Forwarding both
+        // breaks the C++ FClassReflection.Methods TMap keyed by (name, paramCount): the base slot's
+        // entry (NewSlot, no [Override]) wins over the real override, FMethodReflection.bIsOverride
+        // stays false and FCSharpBind never binds the C# override. Collapse duplicate signatures here,
+        // keeping the most-derived declaration (the one carrying [Override]).
+        private static MethodInfo[] LeanCLRCollapseOverriddenMethods(MethodInfo[] InMethods)
+        {
+            var Result = new List<MethodInfo>(InMethods.Length);
+
+            foreach (var Candidate in InMethods)
+            {
+                var CandidateParameters = Candidate.GetParameters();
+
+                var bDuplicate = false;
+
+                for (var i = 0; i < Result.Count; i++)
+                {
+                    var Existing = Result[i];
+
+                    if (Existing.Name != Candidate.Name)
+                    {
+                        continue;
+                    }
+
+                    var ExistingParameters = Existing.GetParameters();
+
+                    if (ExistingParameters.Length != CandidateParameters.Length)
+                    {
+                        continue;
+                    }
+
+                    var bSameSignature = true;
+
+                    for (var ParameterIndex = 0; ParameterIndex < ExistingParameters.Length; ParameterIndex++)
+                    {
+                        if (ExistingParameters[ParameterIndex].ParameterType !=
+                            CandidateParameters[ParameterIndex].ParameterType)
+                        {
+                            bSameSignature = false;
+
+                            break;
+                        }
+                    }
+
+                    if (!bSameSignature)
+                    {
+                        continue;
+                    }
+
+                    bDuplicate = true;
+
+                    // Same name + signature = same vtable slot chain: keep the most-derived declaration.
+                    if (Existing.DeclaringType != null && Candidate.DeclaringType != null &&
+                        Existing.DeclaringType != Candidate.DeclaringType &&
+                        Existing.DeclaringType.IsAssignableFrom(Candidate.DeclaringType))
+                    {
+                        Result[i] = Candidate;
+                    }
+
+                    break;
+                }
+
+                if (!bDuplicate)
+                {
+                    Result.Add(Candidate);
+                }
+            }
+
+            return Result.ToArray();
+        }
+#endif
+
         private static void GetClassMethodsImplementation(Type InType,
             out int OutMethodLength, out string[] OutMethodNames, out MethodBase[] OutMethodInfos,
             out bool[] OutMethodIsStatics, out int[] OutMethodParamCounts, out Type[] OutMethodReturnTypes,
@@ -306,7 +506,9 @@ namespace Script.CoreUObject
             {
                 var UClassAttributeNamespace = typeof(UClassAttribute).Namespace;
 
+#if !LEANCLR
                 var OverrideAttributeTypeFullName = typeof(OverrideAttribute).FullName;
+#endif
 
                 var Constructors = InType.GetConstructors(
                     BindingFlags.Instance |
@@ -321,6 +523,13 @@ namespace Script.CoreUObject
                         BindingFlags.NonPublic)
                     .Where(Method => !Method.IsSpecialName)
                     .ToArray();
+
+#if LEANCLR
+                // leanclr returns the base virtual AND the derived override for the same slot (see
+                // LeanCLRCollapseOverriddenMethods); collapse to the most-derived declaration so the
+                // (name, paramCount)-keyed C++ map keeps the method that actually carries [Override].
+                Methods = LeanCLRCollapseOverriddenMethods(Methods);
+#endif
 
                 var ConstructorLength = Constructors.Length;
 
@@ -420,10 +629,59 @@ namespace Script.CoreUObject
 
                 var MethodAttributeValues = new List<string>();
 
+#if LEANCLR
+                var LeanCLRMethodAttributeCandidates = new List<Type>();
+
+                {
+                    var OverrideAttributeType = typeof(OverrideAttribute);
+
+                    LeanCLRMethodAttributeCandidates.Add(OverrideAttributeType);
+
+                    Type[] CandidateTypes;
+
+                    try
+                    {
+                        CandidateTypes = typeof(UClassAttribute).Assembly.GetTypes();
+                    }
+                    catch (ReflectionTypeLoadException ReflectionTypeLoadException)
+                    {
+                        CandidateTypes = ReflectionTypeLoadException.Types;
+                    }
+
+                    foreach (var CandidateType in CandidateTypes)
+                    {
+                        if (CandidateType != null && CandidateType != OverrideAttributeType &&
+                            CandidateType.Namespace == UClassAttributeNamespace &&
+                            typeof(Attribute).IsAssignableFrom(CandidateType))
+                        {
+                            LeanCLRMethodAttributeCandidates.Add(CandidateType);
+                        }
+                    }
+                }
+#endif
+
                 for (var i = 0; i < OutMethodInfos.Length; i++)
                 {
                     var MethodAttribute = 0;
 
+#if LEANCLR
+                    if (OutMethodInfos[i] is MethodInfo LeanCLRMethodInfo)
+                    {
+                        foreach (var CandidateType in LeanCLRMethodAttributeCandidates)
+                        {
+                            if (LeanCLRMethodInfo.IsDefined(CandidateType, false))
+                            {
+                                MethodAttributes.Add(CandidateType);
+
+                                MethodAttributeValueIndex.Add(0);
+
+                                MethodAttribute++;
+
+                                LeanCLRIsDefinedAttributeHitCount++;
+                            }
+                        }
+                    }
+#else
                     foreach (var CustomAttribute in OutMethodInfos[i].CustomAttributes)
                     {
                         if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace ||
@@ -446,6 +704,7 @@ namespace Script.CoreUObject
                             MethodAttribute++;
                         }
                     }
+#endif
 
                     OutMethodAttributeCounts[i] = MethodAttribute;
                 }
@@ -644,5 +903,103 @@ namespace Script.CoreUObject
                 OutBuffer[13] = OutMethodAttributeValues != null ? HandleData.Alloc(OutMethodAttributeValues) : 0;
             }
         }
+
+#if LEANCLR
+        // LeanCLR diagnostic bridge (override bring-up): dumps the RAW method-level reflection facts for
+        // a named method, so the C++ probe (FLeanCLRDomain::DiagnoseOverrideBinding) sees exactly which
+        // primitive leanclr distorts — is-MethodInfo / IsVirtual / IsAbstract / NewSlot / raw Attributes /
+        // MetadataToken / IsDefined / CustomAttributes enumeration — instead of inferring from the
+        // end-to-end IsOverride=0 symptom. Every slot is best-effort: a reflection call that throws
+        // writes -2 rather than failing the whole dump (a leanclr fatal would still kill the process, but
+        // every call made here is already exercised non-fatally by GetClassMethodsImplementation).
+        //
+        // OutBuffer slot layout (consumed by the C++ probe; 16 slots):
+        //   [0]  methods matching the name (overload count)
+        //   [1]  first match `is MethodInfo`
+        //   [2]  IsVirtual            [3]  IsAbstract          [4]  (Attributes & NewSlot) != 0
+        //   [5]  raw (int)Attributes  [6]  MetadataToken       [7]  IsDefined(OverrideAttribute, false)
+        //   [8]  CustomAttributes.Count()                     [9]  IsStatic
+        //   [10] DeclaringType == probed type                 [11] class-level control: Type.IsDefined(OverrideAttribute)
+        //   [12] GetParameters().Length
+        //   [13] IsDefined attribute-hit counter (lifetime)   [14] structural-override fallback counter (lifetime)
+        //   [15] total methods on the type
+        [UnmanagedCallersOnly]
+        public static unsafe void DumpMethodReflection(nint InTypeHandle, byte* InMethodName, nint* OutBuffer)
+        {
+            for (var i = 0; i < 16; i++)
+            {
+                OutBuffer[i] = 0;
+            }
+
+            OutBuffer[13] = LeanCLRIsDefinedAttributeHitCount;
+
+            // [14] was the structural-override fallback counter; that fallback has been removed (it
+            // mis-tagged generated proxy forwarders like ReceiveBeginPlay as [Override], see
+            // GetClassMethodsImplementation). Kept as a constant 0 so the 16-slot probe layout is stable.
+            OutBuffer[14] = 0;
+
+            if (HandleData.GetObject(InTypeHandle) is not Type Type)
+            {
+                return;
+            }
+
+            var MethodName = Marshal.PtrToStringUTF8((nint)InMethodName);
+
+            var Methods = Type.GetMethods(BindingFlags.Instance | BindingFlags.Static |
+                                          BindingFlags.Public | BindingFlags.NonPublic);
+
+            OutBuffer[15] = Methods.Length;
+
+            MethodBase Found = null;
+
+            var MatchCount = 0;
+
+            foreach (var Method in Methods)
+            {
+                if (Method.Name == MethodName)
+                {
+                    MatchCount++;
+
+                    Found ??= Method;
+                }
+            }
+
+            OutBuffer[0] = MatchCount;
+
+            if (Found == null)
+            {
+                return;
+            }
+
+            OutBuffer[1] = Found is MethodInfo ? 1 : 0;
+
+            if (Found is not MethodInfo MethodInfo)
+            {
+                return;
+            }
+
+            try { OutBuffer[2] = MethodInfo.IsVirtual ? 1 : 0; } catch { OutBuffer[2] = -2; }
+
+            try { OutBuffer[3] = MethodInfo.IsAbstract ? 1 : 0; } catch { OutBuffer[3] = -2; }
+
+            try { OutBuffer[4] = (MethodInfo.Attributes & System.Reflection.MethodAttributes.NewSlot) != 0 ? 1 : 0; } catch { OutBuffer[4] = -2; }
+
+            try { OutBuffer[5] = (int)MethodInfo.Attributes; } catch { OutBuffer[5] = -2; }
+
+            try { OutBuffer[6] = MethodInfo.MetadataToken; } catch { OutBuffer[6] = -2; }
+
+            try { OutBuffer[7] = MethodInfo.IsDefined(typeof(OverrideAttribute), false) ? 1 : 0; } catch { OutBuffer[7] = -2; }
+
+            try { OutBuffer[8] = MethodInfo.CustomAttributes.Count(); } catch { OutBuffer[8] = -2; }
+
+            try { OutBuffer[9] = MethodInfo.IsStatic ? 1 : 0; } catch { OutBuffer[9] = -2; }
+
+            try { OutBuffer[10] = MethodInfo.DeclaringType == Type ? 1 : 0; } catch { OutBuffer[10] = -2; }
+
+            try { OutBuffer[11] = Type.IsDefined(typeof(OverrideAttribute), false) ? 1 : 0; } catch { OutBuffer[11] = -2; }
+
+            try { OutBuffer[12] = MethodInfo.GetParameters().Length; } catch { OutBuffer[12] = -2; }
+        }
+#endif
     }
 }

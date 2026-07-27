@@ -5,6 +5,9 @@
 #if WITH_CORECLR
 #include "Domain/CoreCLR/FCoreCLRDomain.h"
 #endif
+#if WITH_LEANCLR
+#include "Domain/LeanCLR/FLeanCLRDomain.h"
+#endif
 
 EScriptDomainType FScriptDomainFactory::GetScriptDomainType()
 {
@@ -29,6 +32,12 @@ IScriptDomain* FScriptDomainFactory::Create()
 	{
 #if WITH_MONO
 		return new FMonoDomain();
+#endif
+	}
+	else if (ScriptDomainType == EScriptDomainType::LeanCLR)
+	{
+#if WITH_LEANCLR
+		return new FLeanCLRDomain();
 #endif
 	}
 
