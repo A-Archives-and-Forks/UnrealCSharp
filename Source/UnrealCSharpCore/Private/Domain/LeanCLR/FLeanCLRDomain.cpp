@@ -17,6 +17,7 @@
 #include "CoreMacro/FunctionMacro.h"
 #include "CoreMacro/PropertyMacro.h"
 #include "Log/UnrealCSharpLog.h"
+#include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -86,6 +87,28 @@ namespace
 				OutFileData.shared = false;
 
 				return true;
+			}
+		}
+
+		// Diagnostics for packaged builds (iOS/Android): leanclr's own miss message is a std::printf to
+		// stdout, which is invisible on device. Surface the actual attempted paths through UE_LOG so a
+		// missing/mislocated assembly (the err=26 FileNotFound root cause) can be pinpointed. Skip .pdb —
+		// symbol files are intentionally not shipped, so their misses are noise, not errors.
+		if (Extension == TEXT("dll"))
+		{
+			UE_LOG(LogUnrealCSharp, Error,
+			       TEXT("FLeanCLRDomain: file loader could not find %s.%s in %d search dir(s):"),
+			       *AssemblyName, *Extension, GSearchDirectories.Num());
+
+			for (const auto& Directory : GSearchDirectories)
+			{
+				const auto FilePath = FString::Printf(TEXT("%s/%s.%s"), *Directory, *AssemblyName, *Extension);
+
+				UE_LOG(LogUnrealCSharp, Error,
+				       TEXT("FLeanCLRDomain:   tried '%s' (dir exists=%d, file exists=%d)"),
+				       *FilePath,
+				       IFileManager::Get().DirectoryExists(*Directory) ? 1 : 0,
+				       IFileManager::Get().FileExists(*FilePath) ? 1 : 0);
 			}
 		}
 

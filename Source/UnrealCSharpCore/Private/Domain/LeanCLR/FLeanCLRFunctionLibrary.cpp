@@ -23,6 +23,17 @@ FString FLeanCLRFunctionLibrary::GetCorlibDirectory()
 	return FString::Printf(
 		TEXT("%s/Binaries/Android/LeanCLR/Android/net"),
 		*FPaths::ProjectDir());
+#elif PLATFORM_IOS && !WITH_EDITOR
+	// iOS: don't use ExecutablePath()/GetBinariesSubdirectory(). GetBinariesSubdirectory() returns ""
+	// on Apple, and ExecutablePath() points at the .app root — but RuntimeDependencies staged under
+	// $(BinaryOutputDir)/LeanCLR/IOS/net do NOT land there; on iOS $(BinaryOutputDir) resolves to
+	// <sandbox>/Binaries/IOS (same anchor Mono relies on via FPaths::ProjectDir()). So resolve the
+	// corlib the way StageCorlib actually stages it: ProjectDir + Binaries/IOS + the LeanCLR/IOS/net
+	// subpath. (We keep LeanCLR's own subdir layout — no need to mirror Mono's directory structure,
+	// only its path-resolution anchor.)
+	return FString::Printf(
+		TEXT("%s/Binaries/IOS/LeanCLR/IOS/net"),
+		*FPaths::ProjectDir());
 #else
 #if WITH_EDITOR
 	const auto BinaryOutputDirectory = FString::Printf(
