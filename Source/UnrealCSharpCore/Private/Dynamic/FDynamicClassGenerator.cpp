@@ -16,9 +16,6 @@
 #include "Dynamic/FDynamicGenerator.h"
 #include "Dynamic/FDynamicBlueprintExtensionScope.h"
 #include "Delegate/FUnrealCSharpCoreModuleDelegates.h"
-#if WITH_LEANCLR
-#include "Log/UnrealCSharpLog.h"
-#endif
 #endif
 #include "UEVersion.h"
 
@@ -336,22 +333,6 @@ void FDynamicClassGenerator::EndGenerator(UClass* InClass)
 	InClass->StaticLink(true);
 
 	InClass->AssembleReferenceTokenStream();
-
-#if WITH_LEANCLR
-	if (InClass->GetName().Contains(TEXT("Dynamic")))
-	{
-		int32 EndGenPropCount = 0;
-
-		for (TFieldIterator<FProperty> It(InClass, EFieldIteratorFlags::ExcludeSuper,
-		                                  EFieldIteratorFlags::ExcludeDeprecated); It; ++It)
-		{
-			++EndGenPropCount;
-		}
-
-		UE_LOG(LogUnrealCSharp, Warning, TEXT("[P6.1 endgen] class=%s props(after StaticLink)=%d"),
-		       *InClass->GetName(), EndGenPropCount);
-	}
-#endif
 
 	FUnrealCSharpFunctionLibrary::SetClassDefaultObject(InClass);
 

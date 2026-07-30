@@ -22,16 +22,16 @@ EScriptDomainType FScriptDomainFactory::GetScriptDomainType()
 IScriptDomain* FScriptDomainFactory::Create()
 {
 	if (const auto ScriptDomainType = GetScriptDomainType();
-		ScriptDomainType == EScriptDomainType::CoreCLR)
-	{
-#if WITH_CORECLR
-		return new FCoreCLRDomain();
-#endif
-	}
-	else if (ScriptDomainType == EScriptDomainType::Mono)
+		ScriptDomainType == EScriptDomainType::Mono)
 	{
 #if WITH_MONO
 		return new FMonoDomain();
+#endif
+	}
+	else if (ScriptDomainType == EScriptDomainType::CoreCLR)
+	{
+#if WITH_CORECLR
+		return new FCoreCLRDomain();
 #endif
 	}
 	else if (ScriptDomainType == EScriptDomainType::LeanCLR)

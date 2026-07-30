@@ -269,8 +269,6 @@ public class UnrealCSharpCore : ModuleRules
 
 		var bWithLeanCLR = string.Equals(ScriptDomainType, "LeanCLR", System.StringComparison.OrdinalIgnoreCase);
 
-		// The three backends are mutually exclusive: only the one selected by <Platform>ScriptDomainType
-		// is compiled in (its module dependency added and WITH_* set to 1); the other two are WITH_*=0.
 		if (bWithCoreCLR)
 		{
 			PublicDependencyModuleNames.Add("CoreCLR");
