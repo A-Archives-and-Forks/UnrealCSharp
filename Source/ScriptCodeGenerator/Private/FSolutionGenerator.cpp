@@ -212,11 +212,16 @@ void FSolutionGenerator::ReplaceDefineConstants(FString& OutResult)
 	// across all three backends and picks its call form with `#if LEANCLR` — unmanaged calli via
 	// MethodBridge on Mono/CoreCLR, named [DllImport] resolved by the host P/Invoke registry on LeanCLR
 	// (see FLeanCLRDomain::RegisterPInvokes). Emit the define only for the LeanCLR target so Mono/CoreCLR
-	// keep the calli path untouched (zero regression). Read the backend straight from the ini for the
-	// running platform (like FScriptDomainFactory) rather than the cached GetScriptDomainType(), which is
-	// only populated inside an FScriptDomainTypeScope and defaults to CoreCLR outside one.
-	if (FUnrealCSharpFunctionLibrary::GetScriptDomainType(FPlatformProperties::IniPlatformName()) ==
-		EScriptDomainType::LeanCLR)
+	// keep the calli path untouched.
+	//
+	// Read the backend from the ambient FScriptDomainTypeScope (the no-arg overload), NOT from the running
+	// platform's ini: code generation targets the platform passed to FUnrealCSharpEditorModule::Generator,
+	// which is not necessarily the host. Using the host's backend here made this define disagree with
+	// FBindingClassGenerator (which reads the scope) whenever the two platforms' backends differ — e.g.
+	// generating for Android/LeanCLR from a Win64/CoreCLR editor emitted [DllImport] bindings while the
+	// .csproj lacked LEANCLR, so the shared library compiled its calli path against them.
+	// Every caller of FSolutionGenerator::Generator() establishes that scope.
+	if (FUnrealCSharpFunctionLibrary::GetScriptDomainType() == EScriptDomainType::LeanCLR)
 	{
 		DefineConstants += TEXT("LEANCLR;");
 	}

@@ -91,6 +91,14 @@ void FUnrealCSharpEditorModule::StartupModule()
 		FConsoleCommandDelegate::CreateLambda(
 			[]()
 			{
+				// FSolutionGenerator reads the ambient FScriptDomainTypeScope to decide the LEANCLR define
+				// (ReplaceDefineConstants), same as FBindingClassGenerator does for the binding call form.
+				// This command has no target platform of its own, so scope it to the host's configured
+				// backend; without the scope the cached type would be its CoreCLR default and a LeanCLR
+				// project would silently regenerate a .csproj missing LEANCLR.
+				FScriptDomainTypeScope ScriptDomainTypeScope(
+					FUnrealCSharpFunctionLibrary::GetScriptDomainType(FPlatformProperties::IniPlatformName()));
+
 				FSolutionGenerator::Generator();
 			}));
 
