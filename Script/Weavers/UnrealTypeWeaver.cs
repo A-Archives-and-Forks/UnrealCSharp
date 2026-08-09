@@ -223,6 +223,89 @@ namespace Weavers
             return "/Script/CoreUObject." + (name.EndsWith("_C") || Type.IsEnum ? name : name.Substring(1));
         }
 
+        /// <summary>
+        /// For each [UProperty], emit a __&lt;Name&gt;_Attrs static readonly string field that encodes
+        /// all companion attributes (Script.Dynamic namespace, excluding UPropertyAttribute itself)
+        /// so that the LeanCLR Utils.cs path can recover them when PropertyInfo.CustomAttributes is broken.
+        /// Encoding: one attribute per line, "FullTypeName|arg0|arg1|..." (no '|' if zero ctor args).
+        /// </summary>
+        private void EmitCompanionAttributeField(TypeDefinition Type, PropertyDefinition Property)
+        {
+            var lines = new List<string>();
+
+            foreach (var attr in Property.CustomAttributes)
+            {
+                // Only Script.Dynamic namespace, excluding UPropertyAttribute (already handled via __&lt;Name&gt;)
+                var attrType = attr.AttributeType;
+
+                if (attrType.Namespace != "Script.Dynamic" ||
+                    attrType.Name == "UPropertyAttribute")
+                {
+                    continue;
+                }
+
+                var line = attrType.FullName;
+
+                if (attr.HasConstructorArguments)
+                {
+                    foreach (var arg in attr.ConstructorArguments)
+                    {
+                        line += "|";
+                        // CustomAttributeArgument.Value: for strings, it's the UTF8 string directly;
+                        // for enums (e.g. ELifetimeCondition), it's the underlying int.
+                        // Both ToString() safely in Cecil context.
+                        var val = arg.Value;
+                        line += val != null ? val.ToString() : string.Empty;
+                    }
+                }
+
+                lines.Add(line);
+            }
+
+            if (lines.Count == 0)
+            {
+                return; // no companion attributes — nothing to emit
+            }
+
+            var encoded = string.Join("\n", lines);
+
+            // Create static readonly string field
+            var attrsField = new FieldDefinition("__" + Property.Name + "_Attrs",
+                FieldAttributes.Private | FieldAttributes.Static | FieldAttributes.InitOnly,
+                ModuleDefinition.TypeSystem.String);
+
+            Type.Fields.Add(attrsField);
+
+            // Find or create .cctor (type initializer)
+            var cctor = Type.Methods.FirstOrDefault(m =>
+                m.Name == ".cctor" && m.IsStatic && !m.HasParameters);
+
+            if (cctor == null)
+            {
+                cctor = new MethodDefinition(".cctor",
+                    MethodAttributes.Static | MethodAttributes.SpecialName |
+                    MethodAttributes.RTSpecialName | MethodAttributes.Private,
+                    ModuleDefinition.TypeSystem.Void);
+
+                // A .cctor must have at least a Ret instruction so that InsertBefore can find a
+                // valid anchor.  Without this, Body.Instructions is empty, FirstOrDefault() returns
+                // null, and the fallback instruction created below is NOT part of the body —
+                // InsertBefore throws ArgumentOutOfRangeException (caught by Fody) and the
+                // ldstr/stsfld pair is never emitted.
+                cctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+
+                Type.Methods.Add(cctor);
+            }
+
+            // Insert ldstr + stsfld before the first instruction (which is guaranteed to exist now)
+            var il = cctor.Body.GetILProcessor();
+            var firstInstr = il.Body.Instructions[0];
+
+            il.InsertBefore(firstInstr, Instruction.Create(OpCodes.Ldstr, encoded));
+            il.InsertBefore(firstInstr, Instruction.Create(OpCodes.Stsfld,
+                ModuleDefinition.ImportReference(attrsField)));
+        }
+
         private void ProcessUClassType(TypeDefinition Type)
         {
             foreach (var property in Type.Properties)
@@ -247,6 +330,8 @@ namespace Weavers
             {
                 Type.Fields.Remove(backingField);
             }
+
+            EmitCompanionAttributeField(Type, Property);
 
             // 修改setter
             if (Property.SetMethod != null)
@@ -462,6 +547,8 @@ namespace Weavers
             {
                 Type.Fields.Remove(backingField);
             }
+
+            EmitCompanionAttributeField(Type, Property);
 
             // 修改setter
             if (Property.SetMethod != null)

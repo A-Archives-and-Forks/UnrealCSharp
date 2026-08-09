@@ -208,6 +208,19 @@ void FSolutionGenerator::ReplaceDefineConstants(FString& OutResult)
 		DefineConstants += TEXT("WITH_EDITOR;");
 	}
 
+	// LeanCLR backend: the hand-written core library (Script/UE/Library/*Implementation.cs) is shared
+	// across all three backends and picks its call form with `#if LEANCLR` — unmanaged calli via
+	// MethodBridge on Mono/CoreCLR, named [DllImport] resolved by the host P/Invoke registry on LeanCLR
+	// (see FLeanCLRDomain::RegisterPInvokes). Emit the define only for the LeanCLR target so Mono/CoreCLR
+	// keep the calli path untouched (zero regression). Read the backend straight from the ini for the
+	// running platform (like FScriptDomainFactory) rather than the cached GetScriptDomainType(), which is
+	// only populated inside an FScriptDomainTypeScope and defaults to CoreCLR outside one.
+	if (FUnrealCSharpFunctionLibrary::GetScriptDomainType(FPlatformProperties::IniPlatformName()) ==
+		EScriptDomainType::LeanCLR)
+	{
+		DefineConstants += TEXT("LEANCLR;");
+	}
+
 	DefineConstants = FString::Printf(TEXT(
 		"<DefineConstants>$(DefineConstants);%s</DefineConstants>"
 	),

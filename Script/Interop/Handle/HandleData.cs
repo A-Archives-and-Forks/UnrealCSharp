@@ -109,6 +109,30 @@ namespace Interop
             return null;
         }
 
+        // LeanCLR-only reverse-invoke support (host-side stackobject invoke). These let the native side
+        // resolve a HandleData key to the underlying runtime object pointer (to build an argument buffer)
+        // and register a native object pointer as a new handle (for a returned/out object). Runtime-neutral
+        // — Interop.dll has no LEANCLR macro — and never called by Mono/CoreCLR, which invoke C# functions
+        // through their own reflection that already writes back value-type by-ref parameters. Resolved and
+        // invoked through FLeanCLRMarshal like the other Interop bridges (not [UnmanagedCallersOnly]).
+        public static nint GetObjectPointer(nint InHandle)
+        {
+            // Reinterpret the object reference's storage as an nint: under leanclr an object reference is the
+            // RtObject* address, and the object stays pinned-in-place (non-moving GC) and rooted by its
+            // HandleData GCHandle for as long as the handle lives, so the returned pointer is stable.
+            if (GetObject(InHandle) is { } Object)
+            {
+                return Unsafe.As<object, nint>(ref Object);
+            }
+
+            return 0;
+        }
+
+        public static nint AllocFromObject(object InObject)
+        {
+            return Alloc(InObject);
+        }
+
         internal static void Clear()
         {
             lock (Lock)

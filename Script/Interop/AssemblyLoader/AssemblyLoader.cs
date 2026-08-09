@@ -30,12 +30,18 @@ namespace Interop
         [UnmanagedCallersOnly]
         public static void Unload()
         {
+            HandleData.Clear();
+
+            TypeBridge.Clear();
+
+            // Null out every StaticClassSingleton / StaticStructSingleton cache so
+            // StaticClass() / StaticStruct() re-fetch fresh wrappers on the next PIE
+            // session. HandleData.Clear() invalidated all handle→object mappings; ??=
+            // returns the stale (non-null but handle-less) cached wrapper otherwise.
+            ResetStaticSingletons();
+
             if (Context != null)
             {
-                HandleData.Clear();
-
-                TypeBridge.Clear();
-
                 var ContextWeakReference = new WeakReference(Context);
 
                 try
@@ -57,6 +63,40 @@ namespace Interop
 
                     GC.WaitForPendingFinalizers();
                 }
+            }
+        }
+
+        private static void ResetStaticSingletons()
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                System.Type[] types;
+                try { types = asm.GetTypes(); }
+                catch { continue; }
+
+                foreach (var type in types)
+                {
+                    NullStaticSingletonProperty(type, "StaticClassSingleton");
+                    NullStaticSingletonProperty(type, "StaticStructSingleton");
+                }
+            }
+        }
+
+        private static void NullStaticSingletonProperty(System.Type type, string propName)
+        {
+            try
+            {
+                var prop = type.GetProperty(propName,
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Static);
+                if (prop != null && prop.CanWrite)
+                {
+                    prop.SetValue(null, null);
+                }
+            }
+            catch
+            {
+                // skip types that throw during reflection
             }
         }
     }

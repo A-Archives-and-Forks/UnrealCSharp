@@ -150,7 +150,27 @@ public static class TypeBridge
         {
             if (HandleData.GetObject(InHandle) is Type Type)
             {
-                var FullName = $"{Type.FullName}, {Type.Assembly.GetName().Name}";
+                var TypeFullName = Type.FullName;
+
+                // An open generic type DEFINITION must key identically whether it is resolved by name
+                // (FReflectionRegistry generic classes use COMBINE_FULL_NAME = "Namespace.Name`arity") or
+                // through a handle (FullName2Class keys by this GetFullName). LeanCLR appends the generic
+                // parameter list to a definition's FullName (e.g. "...TScriptInterface`1[T]"); CoreCLR/Mono
+                // do not. Left unhandled, the two paths cache two distinct FClassReflection* for the same
+                // open generic, so FTypeBridge::GetPropertyType can never match a generic property/parameter
+                // (returns None -> null property -> dynamic-generation crash). Strip the parameter list for
+                // definitions to align the key. No-op where FullName already lacks it (CoreCLR/Mono).
+                if (Type.IsGenericTypeDefinition && TypeFullName != null)
+                {
+                    var BracketIndex = TypeFullName.IndexOf('[');
+
+                    if (BracketIndex >= 0)
+                    {
+                        TypeFullName = TypeFullName.Substring(0, BracketIndex);
+                    }
+                }
+
+                var FullName = $"{TypeFullName}, {Type.Assembly.GetName().Name}";
 
                 var String = new Span<byte>(OutString, InStringSize);
 
@@ -461,6 +481,15 @@ public static class TypeBridge
             if (Context != null)
             {
                 Type = GetTypeImplementation(Context.Assemblies, AssemblyName, TypeName);
+            }
+            else
+            {
+                // No UnrealAssemblyLoadContext was created: the LeanCLR backend loads the UE/Game
+                // assemblies through its native loader instead of AssemblyLoader.LoadFromStream, so
+                // AssemblyLoader.CurrentContext stays null. Those assemblies are still registered in the
+                // default load context, so resolve the type against everything currently loaded. Mono and
+                // CoreCLR always populate CurrentContext first, so this branch never runs for them.
+                Type = GetTypeImplementation(AppDomain.CurrentDomain.GetAssemblies(), AssemblyName, TypeName);
             }
         }
 

@@ -146,12 +146,40 @@ namespace Interop
         {
             var Type = Nullable.GetUnderlyingType(InType) ?? InType;
 
-            return Type switch
+            if (Type.IsEnum)
             {
-                _ when Type == typeof(bool) => *(bool*)InHandle,
-                { IsEnum: true } => Enum.ToObject(Type,
-                    Marshal.PtrToStructure(InHandle, Enum.GetUnderlyingType(Type))!),
-                _ => Marshal.PtrToStructure(InHandle, Type)!,
+                return Enum.ToObject(Type, ReadPrimitiveValue(InHandle, Enum.GetUnderlyingType(Type)));
+            }
+
+            return ReadPrimitiveValue(InHandle, Type);
+        }
+
+        // Read a primitive value type directly from the pointer instead of Marshal.PtrToStructure.
+        // LeanCLR leaves Marshal.PtrToStructure/StructureToPtr unimplemented (marshal.cpp
+        // ptr_to_structure_impl/structure_to_ptr_impl -> fatal_on_not_implemented_error), which crashed
+        // every UE->C# call carrying a value-type parameter (the first one reached was
+        // SetInt32ValueFunction(int)). Only primitives + enum underlying types ever reach here: every
+        // UStruct/FName/FText/FString/TSubclassOf/TScriptInterface/TSoft*/TWeak*/TArray/TSet/TMap in the
+        // binding surface is a reference (handle) type and takes the HandleData.GetObject path. Direct
+        // pointer reads are byte-identical to PtrToStructure on Mono/CoreCLR, so this is zero-regression;
+        // the Marshal fallback stays for any unexpected blittable value type (not hit by the binding surface).
+        private static object ReadPrimitiveValue(nint InHandle, Type InType)
+        {
+            return InType switch
+            {
+                _ when InType == typeof(bool) => *(bool*)InHandle,
+                _ when InType == typeof(sbyte) => *(sbyte*)InHandle,
+                _ when InType == typeof(byte) => *(byte*)InHandle,
+                _ when InType == typeof(short) => *(short*)InHandle,
+                _ when InType == typeof(ushort) => *(ushort*)InHandle,
+                _ when InType == typeof(int) => *(int*)InHandle,
+                _ when InType == typeof(uint) => *(uint*)InHandle,
+                _ when InType == typeof(long) => *(long*)InHandle,
+                _ when InType == typeof(ulong) => *(ulong*)InHandle,
+                _ when InType == typeof(float) => *(float*)InHandle,
+                _ when InType == typeof(double) => *(double*)InHandle,
+                _ when InType == typeof(char) => *(char*)InHandle,
+                _ => Marshal.PtrToStructure(InHandle, InType)!,
             };
         }
 
@@ -161,19 +189,38 @@ namespace Interop
             {
                 var Type = Nullable.GetUnderlyingType(InType) ?? InType;
 
-                switch (Type)
+                if (Type.IsEnum)
                 {
-                    case var _ when Type == typeof(bool):
-                        *(bool*)InHandle = (bool)InValue;
-                        break;
-                    case { IsEnum: true }:
-                        Marshal.StructureToPtr(
-                            Convert.ChangeType(InValue, Enum.GetUnderlyingType(Type)), InHandle, false);
-                        break;
-                    default:
-                        Marshal.StructureToPtr(InValue, InHandle, false);
-                        break;
+                    var Underlying = Enum.GetUnderlyingType(Type);
+
+                    WritePrimitiveValue(InHandle, Convert.ChangeType(InValue, Underlying), Underlying);
                 }
+                else
+                {
+                    WritePrimitiveValue(InHandle, InValue, Type);
+                }
+            }
+        }
+
+        // Byref (out) write-back counterpart to ReadPrimitiveValue; avoids the unimplemented
+        // Marshal.StructureToPtr for the same primitive + enum surface.
+        private static void WritePrimitiveValue(nint InHandle, object InValue, Type InType)
+        {
+            switch (InType)
+            {
+                case var _ when InType == typeof(bool): *(bool*)InHandle = (bool)InValue; break;
+                case var _ when InType == typeof(sbyte): *(sbyte*)InHandle = (sbyte)InValue; break;
+                case var _ when InType == typeof(byte): *(byte*)InHandle = (byte)InValue; break;
+                case var _ when InType == typeof(short): *(short*)InHandle = (short)InValue; break;
+                case var _ when InType == typeof(ushort): *(ushort*)InHandle = (ushort)InValue; break;
+                case var _ when InType == typeof(int): *(int*)InHandle = (int)InValue; break;
+                case var _ when InType == typeof(uint): *(uint*)InHandle = (uint)InValue; break;
+                case var _ when InType == typeof(long): *(long*)InHandle = (long)InValue; break;
+                case var _ when InType == typeof(ulong): *(ulong*)InHandle = (ulong)InValue; break;
+                case var _ when InType == typeof(float): *(float*)InHandle = (float)InValue; break;
+                case var _ when InType == typeof(double): *(double*)InHandle = (double)InValue; break;
+                case var _ when InType == typeof(char): *(char*)InHandle = (char)InValue; break;
+                default: Marshal.StructureToPtr(InValue, InHandle, false); break;
             }
         }
     }
