@@ -10,9 +10,6 @@
 #include "Reflection/FReflectionRegistry.h"
 #include "Macro/FunctionMacro.h"
 #include "UEVersion.h"
-#if WITH_LEANCLR
-#include "Log/UnrealCSharpLog.h"
-#endif
 
 TSet<TWeakObjectPtr<UStruct>> FCSharpBind::NotOverrideTypes;
 
@@ -157,14 +154,6 @@ bool FCSharpBind::BindImplementation(UStruct* InStruct)
 		}
 	}
 
-#if WITH_LEANCLR
-	if (InStruct->GetName().Contains(TEXT("Dynamic")))
-	{
-		UE_LOG(LogUnrealCSharp, Warning, TEXT("[P6.1 bind] struct=%s __fields=%d ueProps=%d"),
-		       *InStruct->GetName(), Fields.Num(), Properties.Num());
-	}
-#endif
-
 	for (const auto& [PropertyName, Property] : Properties)
 	{
 		for (const auto& Field : Fields)
@@ -179,24 +168,7 @@ bool FCSharpBind::BindImplementation(UStruct* InStruct)
 				                                                      *Field)))
 				{
 					FoundField->SetValue(Class, &FieldHash);
-
-#if WITH_LEANCLR
-					if (InStruct->GetName().Contains(TEXT("Dynamic")))
-					{
-						UE_LOG(LogUnrealCSharp, Warning,
-						       TEXT("[P6.1 bind] struct=%s set __%s hash=%u fieldFound=1"),
-						       *InStruct->GetName(), *Field, FieldHash);
-					}
-#endif
 				}
-#if WITH_LEANCLR
-				else if (InStruct->GetName().Contains(TEXT("Dynamic")))
-				{
-					UE_LOG(LogUnrealCSharp, Warning,
-					       TEXT("[P6.1 bind] struct=%s __%s NOT FOUND on managed class (hash=%u lost)"),
-					       *InStruct->GetName(), *Field, FieldHash);
-				}
-#endif
 
 				FCSharpEnvironment::GetEnvironment().AddPropertyHash(FieldHash, NewClassDescriptor, Property);
 

@@ -8,9 +8,6 @@
 #include "Log/UnrealCSharpLog.h"
 #include <signal.h>
 #include "UEVersion.h"
-#if WITH_LEANCLR
-#include "UObject/UnrealType.h"
-#endif
 
 ACCESS_PRIVATE_MEMBER_PROPERTY(UObjectBase, ObjectFlags, EObjectFlags)
 
@@ -380,33 +377,7 @@ void FCSharpEnvironment::OnAsyncLoadingFlushUpdate()
 		{
 			if (const auto FoundClass = FReflectionRegistry::Get().GetClass(PendingBindObject->GetClass()))
 			{
-#if WITH_LEANCLR
-				const FIntProperty* Int32Probe =
-					PendingBindObject->GetClass()->GetName().Contains(TEXT("RawDynamic"))
-						? CastField<FIntProperty>(
-							PendingBindObject->GetClass()->FindPropertyByName(TEXT("Int32Value")))
-						: nullptr;
-
-				if (Int32Probe != nullptr)
-				{
-					UE_LOG(LogUnrealCSharp, Warning,
-					       TEXT("[P6.1 ctor-readback @PendingBind] class=%s BEFORE Int32Value=%d"),
-					       *PendingBindObject->GetClass()->GetName(),
-					       Int32Probe->GetPropertyValue_InContainer(PendingBindObject));
-				}
-#endif
-
 				FoundClass->ConstructorObject(FoundManagedHandle);
-
-#if WITH_LEANCLR
-				if (Int32Probe != nullptr)
-				{
-					UE_LOG(LogUnrealCSharp, Warning,
-					       TEXT("[P6.1 ctor-readback @PendingBind] class=%s AFTER  Int32Value=%d"),
-					       *PendingBindObject->GetClass()->GetName(),
-					       Int32Probe->GetPropertyValue_InContainer(PendingBindObject));
-				}
-#endif
 			}
 		}
 	}
