@@ -1583,17 +1583,14 @@ void FLeanCLRDomain::LoadAssembly(const TArray<FString>& InAssemblies)
 {
 	Assemblies.Empty();
 
-	const auto InteropPath = FUnrealCSharpFunctionLibrary::GetFullInteropPublishPath();
-
 	for (const auto& AssemblyPath : InAssemblies)
 	{
-		// Interop is already loaded during Initialize; skip it here.
-		if (AssemblyPath == InteropPath)
+		const auto AssemblyName = FPaths::GetBaseFilename(AssemblyPath);
+
+		if (AssemblyName == INTEROP_NAME)
 		{
 			continue;
 		}
-
-		const auto AssemblyName = FPaths::GetBaseFilename(AssemblyPath);
 
 		if (auto LoadedAssembly = leanclr::vm::Assembly::load_by_name(TCHAR_TO_UTF8(*AssemblyName));
 			!LoadedAssembly.is_err() && LoadedAssembly.unwrap() != nullptr)
