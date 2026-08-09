@@ -216,7 +216,6 @@ namespace Script.CoreUObject
                         BindingFlags.Public | BindingFlags.NonPublic |
                         BindingFlags.FlattenHierarchy);
 
-                    var DunderPropCount = 0;
                     foreach (var Field in AllFields)
                     {
                         // StringComparison.Ordinal is mandatory here, do not simplify it away:
@@ -232,12 +231,10 @@ namespace Script.CoreUObject
                             }
                             else
                             {
-                                DunderPropCount++;
                                 LeanCLRWovenFieldNames.Add(Field.Name);
                             }
                         }
                     }
-                    Console.WriteLine($"[LEANCLR fields] {InType.Name} total={AllFields.Length} __props={DunderPropCount} __attrs={LeanCLRWovenAttrFields.Count}");
                 }
                 catch
                 {
@@ -409,14 +406,6 @@ namespace Script.CoreUObject
                 OutFieldInfos = null;
             }
         }
-
-#if LEANCLR
-        // Diagnostic counters (LeanCLR-only): incremented by GetClassMethodsImplementation so the
-        // DumpMethodReflection probe can tell whether the per-method attribute workarounds actually
-        // RAN in the loaded UE.dll — not merely whether they were compiled in (a stale UE.dll is a
-        // real failure mode here, the editor recompiles it at startup).
-        private static int LeanCLRIsDefinedAttributeHitCount;
-#endif
 
 #if LEANCLR
         // leanclr's Type.GetMethods does not collapse overridden virtual slots: an override and the
@@ -676,8 +665,6 @@ namespace Script.CoreUObject
                                 MethodAttributeValueIndex.Add(0);
 
                                 MethodAttribute++;
-
-                                LeanCLRIsDefinedAttributeHitCount++;
                             }
                         }
                     }
@@ -903,103 +890,5 @@ namespace Script.CoreUObject
                 OutBuffer[13] = OutMethodAttributeValues != null ? HandleData.Alloc(OutMethodAttributeValues) : 0;
             }
         }
-
-#if LEANCLR
-        // LeanCLR diagnostic bridge (override bring-up): dumps the RAW method-level reflection facts for
-        // a named method, so the C++ probe (FLeanCLRDomain::DiagnoseOverrideBinding) sees exactly which
-        // primitive leanclr distorts — is-MethodInfo / IsVirtual / IsAbstract / NewSlot / raw Attributes /
-        // MetadataToken / IsDefined / CustomAttributes enumeration — instead of inferring from the
-        // end-to-end IsOverride=0 symptom. Every slot is best-effort: a reflection call that throws
-        // writes -2 rather than failing the whole dump (a leanclr fatal would still kill the process, but
-        // every call made here is already exercised non-fatally by GetClassMethodsImplementation).
-        //
-        // OutBuffer slot layout (consumed by the C++ probe; 16 slots):
-        //   [0]  methods matching the name (overload count)
-        //   [1]  first match `is MethodInfo`
-        //   [2]  IsVirtual            [3]  IsAbstract          [4]  (Attributes & NewSlot) != 0
-        //   [5]  raw (int)Attributes  [6]  MetadataToken       [7]  IsDefined(OverrideAttribute, false)
-        //   [8]  CustomAttributes.Count()                     [9]  IsStatic
-        //   [10] DeclaringType == probed type                 [11] class-level control: Type.IsDefined(OverrideAttribute)
-        //   [12] GetParameters().Length
-        //   [13] IsDefined attribute-hit counter (lifetime)   [14] structural-override fallback counter (lifetime)
-        //   [15] total methods on the type
-        [UnmanagedCallersOnly]
-        public static unsafe void DumpMethodReflection(nint InTypeHandle, byte* InMethodName, nint* OutBuffer)
-        {
-            for (var i = 0; i < 16; i++)
-            {
-                OutBuffer[i] = 0;
-            }
-
-            OutBuffer[13] = LeanCLRIsDefinedAttributeHitCount;
-
-            // [14] was the structural-override fallback counter; that fallback has been removed (it
-            // mis-tagged generated proxy forwarders like ReceiveBeginPlay as [Override], see
-            // GetClassMethodsImplementation). Kept as a constant 0 so the 16-slot probe layout is stable.
-            OutBuffer[14] = 0;
-
-            if (HandleData.GetObject(InTypeHandle) is not Type Type)
-            {
-                return;
-            }
-
-            var MethodName = Marshal.PtrToStringUTF8((nint)InMethodName);
-
-            var Methods = Type.GetMethods(BindingFlags.Instance | BindingFlags.Static |
-                                          BindingFlags.Public | BindingFlags.NonPublic);
-
-            OutBuffer[15] = Methods.Length;
-
-            MethodBase Found = null;
-
-            var MatchCount = 0;
-
-            foreach (var Method in Methods)
-            {
-                if (Method.Name == MethodName)
-                {
-                    MatchCount++;
-
-                    Found ??= Method;
-                }
-            }
-
-            OutBuffer[0] = MatchCount;
-
-            if (Found == null)
-            {
-                return;
-            }
-
-            OutBuffer[1] = Found is MethodInfo ? 1 : 0;
-
-            if (Found is not MethodInfo MethodInfo)
-            {
-                return;
-            }
-
-            try { OutBuffer[2] = MethodInfo.IsVirtual ? 1 : 0; } catch { OutBuffer[2] = -2; }
-
-            try { OutBuffer[3] = MethodInfo.IsAbstract ? 1 : 0; } catch { OutBuffer[3] = -2; }
-
-            try { OutBuffer[4] = (MethodInfo.Attributes & System.Reflection.MethodAttributes.NewSlot) != 0 ? 1 : 0; } catch { OutBuffer[4] = -2; }
-
-            try { OutBuffer[5] = (int)MethodInfo.Attributes; } catch { OutBuffer[5] = -2; }
-
-            try { OutBuffer[6] = MethodInfo.MetadataToken; } catch { OutBuffer[6] = -2; }
-
-            try { OutBuffer[7] = MethodInfo.IsDefined(typeof(OverrideAttribute), false) ? 1 : 0; } catch { OutBuffer[7] = -2; }
-
-            try { OutBuffer[8] = MethodInfo.CustomAttributes.Count(); } catch { OutBuffer[8] = -2; }
-
-            try { OutBuffer[9] = MethodInfo.IsStatic ? 1 : 0; } catch { OutBuffer[9] = -2; }
-
-            try { OutBuffer[10] = MethodInfo.DeclaringType == Type ? 1 : 0; } catch { OutBuffer[10] = -2; }
-
-            try { OutBuffer[11] = Type.IsDefined(typeof(OverrideAttribute), false) ? 1 : 0; } catch { OutBuffer[11] = -2; }
-
-            try { OutBuffer[12] = MethodInfo.GetParameters().Length; } catch { OutBuffer[12] = -2; }
-        }
-#endif
     }
 }

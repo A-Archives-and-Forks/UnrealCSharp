@@ -95,11 +95,6 @@ struct FLeanCLRBridge
 	LEANCLR_BRIDGE_METHOD(UtilsGetClassFields)
 	LEANCLR_BRIDGE_METHOD(UtilsGetClassMethods)
 
-	// Diagnostic-only bridge (LeanCLR-only build of UE.dll): dumps raw per-method reflection facts for
-	// the override-binding probe. Null when the loaded UE.dll predates it — DiagnoseOverrideBinding
-	// tolerates that and skips probe 6.
-	LEANCLR_BRIDGE_METHOD(UtilsDumpMethodReflection)
-
 	LEANCLR_BRIDGE_METHOD(SynchronizationContextTick)
 
 #undef LEANCLR_BRIDGE_METHOD
@@ -207,12 +202,6 @@ private:
 	void RegisterBinding() const;
 
 	void RegisterSynchronizationContextTick();
-
-	// P5 override bring-up diagnostic: walks the full C#-override binding-decision chain (TypeBridge
-	// .GetClass -> attribute classes -> FReflectionRegistry class -> GetClassDescriptor/GetClassMethods
-	// bridges -> per-method IsOverride) and logs each stage, so a silent break in that chain is localized
-	// from a single PIE run. Called at the tail of Initialize(); LeanCLR-only, read-only, non-fatal.
-	void DiagnoseOverrideBinding();
 
 private:
 	FLeanCLRBridge Bridge;

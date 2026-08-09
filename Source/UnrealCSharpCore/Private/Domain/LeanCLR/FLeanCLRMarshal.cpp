@@ -324,7 +324,7 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 
 		if (ThisObject == nullptr)
 		{
-			FLeanCLRLog::ErrorWriter("P6.1: invoke_method ctor -> this resolve failed");
+			FLeanCLRLog::ErrorWriter("LeanCLR: constructor invoke could not resolve 'this'");
 
 			return InvalidManagedHandle;
 		}
@@ -334,9 +334,12 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 		const auto CtorResult = vm::Reflection::invoke_method(InMethod, ThisObject, /*params*/ nullptr,
 		                                                      &CtorException);
 
-		FLeanCLRLog::ErrorWriter(CtorResult.is_err() || CtorException != nullptr
-			                         ? "P6.1: invoke_method ctor -> ERR"
-			                         : "P6.1: invoke_method ctor -> OK");
+		// A managed exception is reported in full just below; this covers the other failure mode
+		// (invoke returned an error with no exception object), which would otherwise be silent.
+		if (CtorResult.is_err() && CtorException == nullptr)
+		{
+			FLeanCLRLog::ErrorWriter("LeanCLR: constructor invoke failed");
+		}
 
 		if (CtorException != nullptr)
 		{
@@ -446,14 +449,6 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 
 	const auto InvokeResult = vm::Runtime::invoke_stackobject_arguments_with_run_cctor(
 		InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData());
-
-	// P6.1 diagnostic: confirm InvokeReverse actually runs a constructor's body on the bound `this`.
-	if (vm::Method::is_ctor(InMethod))
-	{
-		FLeanCLRLog::ErrorWriter(InvokeResult.is_err()
-			                         ? "P6.1: InvokeReverse ctor invoke -> ERR"
-			                         : "P6.1: InvokeReverse ctor invoke -> OK");
-	}
 
 	if (InvokeResult.is_err())
 	{
