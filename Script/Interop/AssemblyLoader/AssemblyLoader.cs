@@ -30,18 +30,18 @@ namespace Interop
         [UnmanagedCallersOnly]
         public static void Unload()
         {
+            // Unconditional (deliberately NOT inside the Context guard below): LeanCLR never creates a
+            // load context — it loads assemblies through its own file loader, so LoadFromStream is never
+            // called and Context stays null. Leaving these inside the guard meant they never ran there.
             HandleData.Clear();
 
             TypeBridge.Clear();
 
-            // Null out every StaticClassSingleton / StaticStructSingleton cache so
-            // StaticClass() / StaticStruct() re-fetch fresh wrappers on the next PIE
-            // session. HandleData.Clear() invalidated all handle→object mappings; ??=
-            // returns the stale (non-null but handle-less) cached wrapper otherwise.
-            ResetStaticSingletons();
-
             if (Context != null)
             {
+                // Mono/CoreCLR: every script static lives in this collectible context, so unloading it
+                // discards the StaticClassSingleton / StaticStructSingleton caches along with everything
+                // else. No explicit reset needed here - a reflection sweep would be pure waste.
                 var ContextWeakReference = new WeakReference(Context);
 
                 try
@@ -64,34 +64,92 @@ namespace Interop
                     GC.WaitForPendingFinalizers();
                 }
             }
+            else
+            {
+                // LeanCLR (no collectible context): the script assemblies and their statics survive
+                // teardown, so StaticClass() / StaticStruct() would keep returning the wrapper cached by
+                // `??=` - non-null, but holding a handle that HandleData.Clear() just invalidated. The
+                // next PIE session then cannot spawn (the native ObjectRegistry is fresh and has no such
+                // handle). Null the cached wrappers so they are re-fetched.
+                ResetStaticSingletons();
+            }
         }
+
+        // Discovered once and reused: on the backend that reaches this path the script assemblies are
+        // never unloaded, so these PropertyInfo objects stay valid across PIE sessions. Only the
+        // already-proven reflection surface is used here (GetAssemblies / GetTypes / GetProperty /
+        // SetValue) - see the design note on not narrowing this by assembly identity.
+        private static System.Reflection.PropertyInfo[]? StaticSingletonProperties;
+
+        private static int StaticSingletonAssemblyCount;
 
         private static void ResetStaticSingletons()
         {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                System.Type[] types;
-                try { types = asm.GetTypes(); }
-                catch { continue; }
+            var Assemblies = AppDomain.CurrentDomain.GetAssemblies();
 
-                foreach (var type in types)
+            // Re-discover if the assembly set grew since the last pass.
+            if (StaticSingletonProperties == null || Assemblies.Length != StaticSingletonAssemblyCount)
+            {
+                StaticSingletonProperties = DiscoverStaticSingletonProperties(Assemblies);
+
+                StaticSingletonAssemblyCount = Assemblies.Length;
+            }
+
+            foreach (var Property in StaticSingletonProperties)
+            {
+                try
                 {
-                    NullStaticSingletonProperty(type, "StaticClassSingleton");
-                    NullStaticSingletonProperty(type, "StaticStructSingleton");
+                    Property.SetValue(null, null);
+                }
+                catch
+                {
+                    // A setter that throws must not abort the remaining resets.
                 }
             }
         }
 
-        private static void NullStaticSingletonProperty(System.Type type, string propName)
+        private static System.Reflection.PropertyInfo[] DiscoverStaticSingletonProperties(
+            System.Reflection.Assembly[] InAssemblies)
+        {
+            var Result = new System.Collections.Generic.List<System.Reflection.PropertyInfo>();
+
+            foreach (var Assembly in InAssemblies)
+            {
+                System.Type[] Types;
+
+                try
+                {
+                    Types = Assembly.GetTypes();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var Type in Types)
+                {
+                    AddStaticSingletonProperty(Result, Type, "StaticClassSingleton");
+
+                    AddStaticSingletonProperty(Result, Type, "StaticStructSingleton");
+                }
+            }
+
+            return Result.ToArray();
+        }
+
+        private static void AddStaticSingletonProperty(
+            System.Collections.Generic.List<System.Reflection.PropertyInfo> OutProperties,
+            System.Type InType, string InPropertyName)
         {
             try
             {
-                var prop = type.GetProperty(propName,
+                var Property = InType.GetProperty(InPropertyName,
                     System.Reflection.BindingFlags.NonPublic |
                     System.Reflection.BindingFlags.Static);
-                if (prop != null && prop.CanWrite)
+
+                if (Property != null && Property.CanWrite)
                 {
-                    prop.SetValue(null, null);
+                    OutProperties.Add(Property);
                 }
             }
             catch
