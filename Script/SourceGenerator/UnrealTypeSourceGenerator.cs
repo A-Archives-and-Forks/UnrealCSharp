@@ -150,7 +150,7 @@ namespace SourceGenerator
                         source +=
                             $"\t\tpublic{newBody} static UScriptStruct StaticStruct()\n" +
                             "\t\t{\n" +
-                            $"\t\t\treturn StaticStructSingleton ??= UStructImplementation.UStruct_StaticStructImplementation(\"{fullPath}\");\n" +
+                            $"\t\t\treturn StaticStructSingleton ??= (UScriptStruct)Interop.AssemblyLoader.RegisterStaticStructSingleton(\n\t\t\t\ttypeof({type.Value.Name}), UStructImplementation.UStruct_StaticStructImplementation(\"{fullPath}\"));\n" +
                             "\t\t}\n" +
                             "\t\tprivate static UScriptStruct StaticStructSingleton { get; set; }\n";
                     }
@@ -213,7 +213,7 @@ namespace SourceGenerator
                         source +=
                             "\t\tpublic new static UClass StaticClass()\n" +
                             "\t\t{\n" +
-                            $"\t\t\treturn StaticClassSingleton ??= UObjectImplementation.UObject_StaticClassImplementation(\"{fullPath}\");\n" +
+                            $"\t\t\treturn StaticClassSingleton ??= (UClass)Interop.AssemblyLoader.RegisterStaticClassSingleton(\n\t\t\t\ttypeof({type.Value.Name}), UObjectImplementation.UObject_StaticClassImplementation(\"{fullPath}\"));\n" +
                             "\t\t}\n" +
                             "\t\tprivate static UClass StaticClassSingleton { get; set; }\n";
                     }
