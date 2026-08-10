@@ -23,11 +23,20 @@ class RtModuleDef;
 // leanclr counterpart of SCRIPT_TYPES (IScriptTypes.h): where Mono/CoreCLR cache native function
 // pointers, strategy A caches RtMethodInfo* and calls them through vm::Runtime::invoke (an IL
 // interpreter cannot hand out callable native pointers). Populated by ResolveBridgeMethods (P4).
+//
+// Deliberately narrower than SCRIPT_TYPES: four of its entries cannot be reached from this backend
+// and are therefore absent, so that ResolveBridgeMethods' resolved N/N health log only counts
+// handles that are actually callable.
+//   - LogBridge.SetLog / TypeBridge.GetFunctionPointer: both hand a native function pointer across
+//     the boundary, which leanclr cannot do (R5: no unmanaged calli).
+//   - LogBridge.Initialize: superseded by InitializeLeanCLR + the LogLeanCLR P/Invoke registered in
+//     RegisterBindingPInvokes.
+//   - AssemblyLoader.LoadFromStream: assemblies are loaded by FLeanCLRFileLoader +
+//     Assembly::load_by_name, never from a managed stream.
 struct FLeanCLRBridge
 {
 #define LEANCLR_BRIDGE_METHOD(Name) const leanclr::metadata::RtMethodInfo* Name{};
 
-	LEANCLR_BRIDGE_METHOD(AssemblyLoaderLoadFromStream)
 	LEANCLR_BRIDGE_METHOD(AssemblyLoaderUnload)
 
 	LEANCLR_BRIDGE_METHOD(HandleDataFree)
@@ -38,13 +47,9 @@ struct FLeanCLRBridge
 	LEANCLR_BRIDGE_METHOD(HandleDataGetObjectPointer)
 	LEANCLR_BRIDGE_METHOD(HandleDataAllocFromObject)
 
-	LEANCLR_BRIDGE_METHOD(LogBridgeSetLog)
-	LEANCLR_BRIDGE_METHOD(LogBridgeInitialize)
-
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetClass)
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetType)
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetMethod)
-	LEANCLR_BRIDGE_METHOD(TypeBridgeGetFunctionPointer)
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetNamespace)
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetName)
 	LEANCLR_BRIDGE_METHOD(TypeBridgeGetFullName)
