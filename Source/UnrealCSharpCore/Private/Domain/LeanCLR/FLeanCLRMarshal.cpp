@@ -21,6 +21,37 @@ THIRD_PARTY_INCLUDES_END
 
 using namespace leanclr;
 
+namespace
+{
+	// format_exception produces multi-line text (type + message + stack trace) and UE_LOG's %s stops at
+	// the first newline, so the text has to be split and logged line by line. All three invoke paths
+	// (forward invoke, reverse ctor, reverse method) need exactly this, so it lives here once.
+	void LogManagedException(vm::RtException* InException)
+	{
+		if (InException == nullptr)
+		{
+			return;
+		}
+
+		utils::Utf8StringBuilder StringBuilder;
+
+		vm::Exception::format_exception(InException, StringBuilder);
+
+		StringBuilder.sure_null_terminator_but_not_append();
+
+		const FString FullLog = UTF8_TO_TCHAR(StringBuilder.get_const_chars());
+
+		TArray<FString> Lines;
+
+		FullLog.ParseIntoArrayLines(Lines);
+
+		for (const FString& Line : Lines)
+		{
+			UE_LOG(LogUnrealCSharp, Error, TEXT("[LeanCLR] %s"), *Line);
+		}
+	}
+}
+
 const metadata::RtMethodInfo* FLeanCLRMarshal::ResolveMethod(
 	metadata::RtModuleDef* InModule, const char* InFullClassName, const char* InMethodName)
 {
@@ -85,24 +116,7 @@ bool FLeanCLRMarshal::Invoke(const metadata::RtMethodInfo* InMethod,
 	{
 		if (vm::RtException* Exception = vm::Exception::get_and_clear_current_exception())
 		{
-			utils::Utf8StringBuilder StringBuilder;
-
-			vm::Exception::format_exception(Exception, StringBuilder);
-
-			StringBuilder.sure_null_terminator_but_not_append();
-
-			{
-				// format_exception output is multi-line (type + message + stack trace);
-				// UE_LOG %s truncates at newlines — emit line by line instead.
-				const char* FullText = StringBuilder.get_const_chars();
-				FString FullLog = UTF8_TO_TCHAR(FullText);
-				TArray<FString> Lines;
-				FullLog.ParseIntoArrayLines(Lines);
-				for (const FString& Line : Lines)
-				{
-					UE_LOG(LogUnrealCSharp, Error, TEXT("[LeanCLR] %s"), *Line);
-				}
-			}
+			LogManagedException(Exception);
 		}
 		else
 		{
@@ -343,24 +357,7 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 
 		if (CtorException != nullptr)
 		{
-			utils::Utf8StringBuilder StringBuilder;
-
-			vm::Exception::format_exception(reinterpret_cast<vm::RtException*>(CtorException), StringBuilder);
-
-			StringBuilder.sure_null_terminator_but_not_append();
-
-			{
-				// format_exception output is multi-line (type + message + stack trace);
-				// UE_LOG %s truncates at newlines — emit line by line instead.
-				const char* FullText = StringBuilder.get_const_chars();
-				FString FullLog = UTF8_TO_TCHAR(FullText);
-				TArray<FString> Lines;
-				FullLog.ParseIntoArrayLines(Lines);
-				for (const FString& Line : Lines)
-				{
-					UE_LOG(LogUnrealCSharp, Error, TEXT("[LeanCLR] %s"), *Line);
-				}
-			}
+			LogManagedException(reinterpret_cast<vm::RtException*>(CtorException));
 		}
 
 		// A constructor is void: nothing to marshal back to the caller.
@@ -454,24 +451,7 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 	{
 		if (vm::RtException* Exception = vm::Exception::get_and_clear_current_exception())
 		{
-			utils::Utf8StringBuilder StringBuilder;
-
-			vm::Exception::format_exception(Exception, StringBuilder);
-
-			StringBuilder.sure_null_terminator_but_not_append();
-
-			{
-				// format_exception output is multi-line (type + message + stack trace);
-				// UE_LOG %s truncates at newlines — emit line by line instead.
-				const char* FullText = StringBuilder.get_const_chars();
-				FString FullLog = UTF8_TO_TCHAR(FullText);
-				TArray<FString> Lines;
-				FullLog.ParseIntoArrayLines(Lines);
-				for (const FString& Line : Lines)
-				{
-					UE_LOG(LogUnrealCSharp, Error, TEXT("[LeanCLR] %s"), *Line);
-				}
-			}
+			LogManagedException(Exception);
 		}
 		else
 		{

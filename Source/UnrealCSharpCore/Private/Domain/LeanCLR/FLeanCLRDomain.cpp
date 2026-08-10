@@ -361,6 +361,40 @@ namespace
 
 		RET_VOID_OK();
 	}
+
+	// GetNamespace / GetName / GetFullName each marshal (handle, buffer, capacity) into a bridge method
+	// that writes UTF-8 into the buffer and returns the written length. The three bodies were verbatim
+	// identical apart from which bridge method they name (and GetFullName's suffix trim, which stays at
+	// its call site), so the dance lives here once instead of three times.
+	// (Fully qualified: this TU has no file-scope `using namespace leanclr` -- the one above is local to
+	// LeanCLRNativeInvoker.)
+	FString InvokeForString(const leanclr::metadata::RtMethodInfo* InMethod, const IManagedHandle InManagedClass)
+	{
+		if (!IManagedHandleIsValid(InManagedClass) || InMethod == nullptr)
+		{
+			return {};
+		}
+
+		constexpr auto Size = 512;
+
+		uint8 String[Size];
+
+		FLeanCLRMarshal::FStackObject Args[3] = {
+			FLeanCLRMarshal::FromHandle(InManagedClass),
+			FLeanCLRMarshal::FromPointer(String),
+			FLeanCLRMarshal::FromInt32(Size)
+		};
+
+		if (FLeanCLRMarshal::FStackObject Return{}; FLeanCLRMarshal::Invoke(InMethod, Args, 3, Return))
+		{
+			if (FLeanCLRMarshal::ToInt32(Return) > 0)
+			{
+				return FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(String)));
+			}
+		}
+
+		return {};
+	}
 }
 
 void FLeanCLRDomain::Initialize()
@@ -488,89 +522,27 @@ void FLeanCLRDomain::Tick(const float InDeltaTime)
 
 FString FLeanCLRDomain::GetNamespace(const IManagedHandle InManagedClass)
 {
-	if (IManagedHandleIsValid(InManagedClass) && Bridge.TypeBridgeGetNamespace != nullptr)
-	{
-		constexpr auto Size = 512;
-
-		uint8 String[Size];
-
-		FLeanCLRMarshal::FStackObject Args[3] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(String),
-			FLeanCLRMarshal::FromInt32(Size)
-		};
-
-		if (FLeanCLRMarshal::FStackObject Return{}; FLeanCLRMarshal::Invoke(Bridge.TypeBridgeGetNamespace, Args, 3, Return))
-		{
-			if (FLeanCLRMarshal::ToInt32(Return) > 0)
-			{
-				return FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(String)));
-			}
-		}
-	}
-
-	return {};
+	return InvokeForString(Bridge.TypeBridgeGetNamespace, InManagedClass);
 }
 
 FString FLeanCLRDomain::GetName(const IManagedHandle InManagedClass)
 {
-	if (IManagedHandleIsValid(InManagedClass) && Bridge.TypeBridgeGetName != nullptr)
-	{
-		constexpr auto Size = 512;
-
-		uint8 String[Size];
-
-		FLeanCLRMarshal::FStackObject Args[3] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(String),
-			FLeanCLRMarshal::FromInt32(Size)
-		};
-
-		if (FLeanCLRMarshal::FStackObject Return{}; FLeanCLRMarshal::Invoke(Bridge.TypeBridgeGetName, Args, 3, Return))
-		{
-			if (FLeanCLRMarshal::ToInt32(Return) > 0)
-			{
-				return FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(String)));
-			}
-		}
-	}
-
-	return {};
+	return InvokeForString(Bridge.TypeBridgeGetName, InManagedClass);
 }
 
 FString FLeanCLRDomain::GetFullName(const IManagedHandle InManagedClass)
 {
-	if (IManagedHandleIsValid(InManagedClass) && Bridge.TypeBridgeGetFullName != nullptr)
+	auto Result = InvokeForString(Bridge.TypeBridgeGetFullName, InManagedClass);
+
+	// The managed full name can carry an assembly-qualified suffix ", Assembly, ..."; keep only
+	// the type portion (mirrors FScriptDomainImpl.inl::GetFullName). On a failed invoke Result is
+	// empty and FindLastChar reports no match, so the empty-return behaviour is unchanged.
+	if (int32 Index; Result.FindLastChar(TEXT(','), Index))
 	{
-		constexpr auto Size = 512;
-
-		uint8 String[Size];
-
-		FLeanCLRMarshal::FStackObject Args[3] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(String),
-			FLeanCLRMarshal::FromInt32(Size)
-		};
-
-		if (FLeanCLRMarshal::FStackObject Return{}; FLeanCLRMarshal::Invoke(Bridge.TypeBridgeGetFullName, Args, 3, Return))
-		{
-			if (FLeanCLRMarshal::ToInt32(Return) > 0)
-			{
-				auto Result = FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(String)));
-
-				// The managed full name can carry an assembly-qualified suffix ", Assembly, ..."; keep only
-				// the type portion (mirrors FScriptDomainImpl.inl::GetFullName).
-				if (int32 Index; Result.FindLastChar(TEXT(','), Index))
-				{
-					Result = Result.Left(Index).TrimEnd();
-				}
-
-				return Result;
-			}
-		}
+		Result = Result.Left(Index).TrimEnd();
 	}
 
-	return {};
+	return Result;
 }
 
 IManagedHandle FLeanCLRDomain::NewObject(const IManagedHandle InManagedClass)
