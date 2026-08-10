@@ -12,6 +12,106 @@ namespace Script.CoreUObject
 {
     public static class Utils
     {
+#if LEANCLR
+        // Everything in this region is process-wide and immutable once built: the UE assembly is
+        // never unloaded on this backend (there is no collectible ALC, see AssemblyLoader.Unload),
+        // so a type set derived from it cannot go stale. Before P8.6 these were rebuilt for EVERY
+        // class the reflection layer resolved, each rebuild walking all ~17k UE.dll types.
+        private static List<Type> LeanCLRAttributeCandidates;
+
+        private static HashSet<Type> LeanCLRAttributeCandidateSet;
+
+        private static Dictionary<string, Type> LeanCLRUETypesByFullName;
+
+        // Candidates = OverrideAttribute plus every Attribute in the UClassAttribute namespace.
+        // Measured on this project: 256 entries. The set is what the C++ side can consume
+        // (FReflectionRegistry exposes 254 distinct Get*AttributeClass() accessors), so it must
+        // NOT be narrowed to the attributes a particular game happens to use today.
+        private static void LeanCLREnsureAttributeCandidates()
+        {
+            if (LeanCLRAttributeCandidates != null)
+            {
+                return;
+            }
+
+            var Candidates = new List<Type>();
+
+            var OverrideAttributeType = typeof(OverrideAttribute);
+
+            Candidates.Add(OverrideAttributeType);
+
+            var CandidateNamespace = typeof(UClassAttribute).Namespace;
+
+            Type[] CandidateTypes;
+
+            try
+            {
+                CandidateTypes = typeof(UClassAttribute).Assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ReflectionTypeLoadException)
+            {
+                CandidateTypes = ReflectionTypeLoadException.Types;
+            }
+
+            foreach (var CandidateType in CandidateTypes)
+            {
+                if (CandidateType != null && CandidateType != OverrideAttributeType &&
+                    CandidateType.Namespace == CandidateNamespace &&
+                    typeof(Attribute).IsAssignableFrom(CandidateType))
+                {
+                    Candidates.Add(CandidateType);
+                }
+            }
+
+            LeanCLRAttributeCandidateSet = new HashSet<Type>(Candidates);
+
+            // Assign last: this field doubles as the "built" flag for both collections.
+            LeanCLRAttributeCandidates = Candidates;
+        }
+
+        // Replaces a full UEAssembly.GetTypes().FirstOrDefault(...) scan per unresolved name.
+        // First-wins insertion so lookups match what FirstOrDefault returned.
+        private static Type LeanCLRFindUETypeByFullName(string InFullName)
+        {
+            if (LeanCLRUETypesByFullName == null)
+            {
+                var Map = new Dictionary<string, Type>();
+
+                try
+                {
+                    Type[] Types;
+
+                    try
+                    {
+                        Types = typeof(UClassAttribute).Assembly.GetTypes();
+                    }
+                    catch (ReflectionTypeLoadException ReflectionTypeLoadException)
+                    {
+                        Types = ReflectionTypeLoadException.Types;
+                    }
+
+                    foreach (var Type in Types)
+                    {
+                        var FullName = Type?.FullName;
+
+                        if (FullName != null && !Map.ContainsKey(FullName))
+                        {
+                            Map[FullName] = Type;
+                        }
+                    }
+                }
+                catch
+                {
+                    // A partial map is still better than rescanning; never abort the parse.
+                }
+
+                LeanCLRUETypesByFullName = Map;
+            }
+
+            return LeanCLRUETypesByFullName.TryGetValue(InFullName, out var Result) ? Result : null;
+        }
+#endif
+
         public static string GetPathName(Type InType) => InType.GetCustomAttribute<PathNameAttribute>(true)?.PathName;
 
         private static Type GetType(Type InType) =>
@@ -240,11 +340,6 @@ namespace Script.CoreUObject
                 {
                     // Never let field discovery abort the property parse.
                 }
-
-                // Cache the UE assembly once for Type resolution from attribute full names.
-                Assembly UEAssembly = null;
-                try { UEAssembly = typeof(UClassAttribute).Assembly; }
-                catch { }
 #endif
 
                 for (var i = 0; i < OutPropertyInfos.Length; i++)
@@ -286,20 +381,11 @@ namespace Script.CoreUObject
                                 var Parts = Line.Split('|');
                                 var TypeFullName = Parts[0];
 
-                                var AttrType = Type.GetType(TypeFullName);
-
-                                if (AttrType == null && UEAssembly != null)
-                                {
-                                    try
-                                    {
-                                        AttrType = UEAssembly.GetTypes()
-                                            .FirstOrDefault(t => t.FullName == TypeFullName);
-                                    }
-                                    catch
-                                    {
-                                        // skip on assembly scan error
-                                    }
-                                }
+                                // Type.GetType misses every time on leanclr (measured in-editor:
+                                // getType=0, dictionary=75), so the dictionary is the real lookup
+                                // path here rather than a rare fallback.
+                                var AttrType = Type.GetType(TypeFullName) ??
+                                               LeanCLRFindUETypeByFullName(TypeFullName);
 
                                 if (AttrType == null)
                                 {
@@ -415,70 +501,123 @@ namespace Script.CoreUObject
         // entry (NewSlot, no [Override]) wins over the real override, FMethodReflection.bIsOverride
         // stays false and FCSharpBind never binds the C# override. Collapse duplicate signatures here,
         // keeping the most-derived declaration (the one carrying [Override]).
+        //
+        // Duplicates can only share a (Name, ParamCount) key, so bucket on that instead of rescanning
+        // every kept method: the linear scan compared each candidate against all previously kept
+        // methods, which is O(n^2) in a class's method count. Measured over UE.dll + Game.dll
+        // (14518 classes / 321888 methods): 14596382 comparisons -> 871, output identical.
         private static MethodInfo[] LeanCLRCollapseOverriddenMethods(MethodInfo[] InMethods)
         {
             var Result = new List<MethodInfo>(InMethods.Length);
+
+            // Parameter types of Result[i], captured once (GetParameters allocates a fresh array on
+            // every call, and the old code re-read it for every comparison).
+            var ResultParameterTypes = new List<Type[]>(InMethods.Length);
+
+            var Buckets = new Dictionary<LeanCLRMethodSignatureKey, List<int>>();
 
             foreach (var Candidate in InMethods)
             {
                 var CandidateParameters = Candidate.GetParameters();
 
+                var CandidateParameterTypes = new Type[CandidateParameters.Length];
+
+                for (var ParameterIndex = 0; ParameterIndex < CandidateParameters.Length; ParameterIndex++)
+                {
+                    CandidateParameterTypes[ParameterIndex] = CandidateParameters[ParameterIndex].ParameterType;
+                }
+
+                var Key = new LeanCLRMethodSignatureKey(Candidate.Name, CandidateParameterTypes.Length);
+
                 var bDuplicate = false;
 
-                for (var i = 0; i < Result.Count; i++)
+                Buckets.TryGetValue(Key, out var Bucket);
+
+                if (Bucket != null)
                 {
-                    var Existing = Result[i];
-
-                    if (Existing.Name != Candidate.Name)
+                    foreach (var Index in Bucket)
                     {
-                        continue;
-                    }
+                        var ExistingParameterTypes = ResultParameterTypes[Index];
 
-                    var ExistingParameters = Existing.GetParameters();
+                        var bSameSignature = true;
 
-                    if (ExistingParameters.Length != CandidateParameters.Length)
-                    {
-                        continue;
-                    }
-
-                    var bSameSignature = true;
-
-                    for (var ParameterIndex = 0; ParameterIndex < ExistingParameters.Length; ParameterIndex++)
-                    {
-                        if (ExistingParameters[ParameterIndex].ParameterType !=
-                            CandidateParameters[ParameterIndex].ParameterType)
+                        for (var ParameterIndex = 0;
+                             ParameterIndex < ExistingParameterTypes.Length;
+                             ParameterIndex++)
                         {
-                            bSameSignature = false;
+                            if (ExistingParameterTypes[ParameterIndex] !=
+                                CandidateParameterTypes[ParameterIndex])
+                            {
+                                bSameSignature = false;
 
-                            break;
+                                break;
+                            }
                         }
+
+                        if (!bSameSignature)
+                        {
+                            continue;
+                        }
+
+                        bDuplicate = true;
+
+                        var Existing = Result[Index];
+
+                        // Same name + signature = same vtable slot chain: keep the most-derived declaration.
+                        if (Existing.DeclaringType != null && Candidate.DeclaringType != null &&
+                            Existing.DeclaringType != Candidate.DeclaringType &&
+                            Existing.DeclaringType.IsAssignableFrom(Candidate.DeclaringType))
+                        {
+                            Result[Index] = Candidate;
+                        }
+
+                        break;
                     }
-
-                    if (!bSameSignature)
-                    {
-                        continue;
-                    }
-
-                    bDuplicate = true;
-
-                    // Same name + signature = same vtable slot chain: keep the most-derived declaration.
-                    if (Existing.DeclaringType != null && Candidate.DeclaringType != null &&
-                        Existing.DeclaringType != Candidate.DeclaringType &&
-                        Existing.DeclaringType.IsAssignableFrom(Candidate.DeclaringType))
-                    {
-                        Result[i] = Candidate;
-                    }
-
-                    break;
                 }
 
                 if (!bDuplicate)
                 {
+                    if (Bucket == null)
+                    {
+                        Buckets[Key] = Bucket = new List<int>();
+                    }
+
+                    Bucket.Add(Result.Count);
+
                     Result.Add(Candidate);
+
+                    ResultParameterTypes.Add(CandidateParameterTypes);
                 }
             }
 
             return Result.ToArray();
+        }
+
+        private readonly struct LeanCLRMethodSignatureKey : IEquatable<LeanCLRMethodSignatureKey>
+        {
+            private readonly string Name;
+
+            private readonly int ParameterCount;
+
+            public LeanCLRMethodSignatureKey(string InName, int InParameterCount)
+            {
+                Name = InName;
+
+                ParameterCount = InParameterCount;
+            }
+
+            public bool Equals(LeanCLRMethodSignatureKey InOther) =>
+                ParameterCount == InOther.ParameterCount &&
+                string.Equals(Name, InOther.Name, StringComparison.Ordinal);
+
+            public override bool Equals(object InOther) =>
+                InOther is LeanCLRMethodSignatureKey Other && Equals(Other);
+
+            // Ordinal comparison is mandatory, do not simplify it away: leanclr only implements the
+            // Win32 NLS path, so culture-sensitive string APIs silently misbehave on POSIX targets
+            // (see the StartsWith note in GetClassPropertiesImplementation). string.GetHashCode() is
+            // ordinal by contract, so it pairs correctly with the ordinal Equals above.
+            public override int GetHashCode() => (Name?.GetHashCode() ?? 0) ^ ParameterCount;
         }
 #endif
 
@@ -619,34 +758,11 @@ namespace Script.CoreUObject
                 var MethodAttributeValues = new List<string>();
 
 #if LEANCLR
-                var LeanCLRMethodAttributeCandidates = new List<Type>();
+                LeanCLREnsureAttributeCandidates();
 
-                {
-                    var OverrideAttributeType = typeof(OverrideAttribute);
+                var LeanCLRMethodAttributeCandidates = LeanCLRAttributeCandidates;
 
-                    LeanCLRMethodAttributeCandidates.Add(OverrideAttributeType);
-
-                    Type[] CandidateTypes;
-
-                    try
-                    {
-                        CandidateTypes = typeof(UClassAttribute).Assembly.GetTypes();
-                    }
-                    catch (ReflectionTypeLoadException ReflectionTypeLoadException)
-                    {
-                        CandidateTypes = ReflectionTypeLoadException.Types;
-                    }
-
-                    foreach (var CandidateType in CandidateTypes)
-                    {
-                        if (CandidateType != null && CandidateType != OverrideAttributeType &&
-                            CandidateType.Namespace == UClassAttributeNamespace &&
-                            typeof(Attribute).IsAssignableFrom(CandidateType))
-                        {
-                            LeanCLRMethodAttributeCandidates.Add(CandidateType);
-                        }
-                    }
-                }
+                HashSet<Type> LeanCLRMethodAttributeHits = null;
 #endif
 
                 for (var i = 0; i < OutMethodInfos.Length; i++)
@@ -656,15 +772,52 @@ namespace Script.CoreUObject
 #if LEANCLR
                     if (OutMethodInfos[i] is MethodInfo LeanCLRMethodInfo)
                     {
-                        foreach (var CandidateType in LeanCLRMethodAttributeCandidates)
+                        // Ask each applied attribute which candidates it satisfies, rather than asking
+                        // all 256 candidates whether they are applied. IsDefined(C, false) is true iff
+                        // some attribute applied directly to this member has a type assignable to C, so
+                        // walking each applied type's base chain reproduces the same answer set exactly
+                        // -- including the base entries that make a [UFunction] method also report
+                        // OverrideAttribute (6 of the 256 candidates derive from it).
+                        //
+                        // This reads MethodInfo.CustomAttributes, which is NOT new API surface on this
+                        // backend: the UFunction scan above already enumerates it for every method, and
+                        // it was measured working on leanclr (P6 doc 5.18, 'Test' CA.Count=1). Only the
+                        // PropertyInfo side is broken there, which is why properties still go through
+                        // the woven __<Name> fields.
+                        //
+                        // Measured over UE.dll + Game.dll: 82149376 IsDefined calls -> 74788 applied
+                        // attribute visits (-99.9%), with 0 differences in the emitted sequence.
+                        LeanCLRMethodAttributeHits?.Clear();
+
+                        foreach (var CustomAttribute in LeanCLRMethodInfo.CustomAttributes)
                         {
-                            if (LeanCLRMethodInfo.IsDefined(CandidateType, false))
+                            for (var AttributeType = CustomAttribute.AttributeType;
+                                 AttributeType != null;
+                                 AttributeType = AttributeType.BaseType)
                             {
-                                MethodAttributes.Add(CandidateType);
+                                if (LeanCLRAttributeCandidateSet.Contains(AttributeType))
+                                {
+                                    LeanCLRMethodAttributeHits ??= new HashSet<Type>();
 
-                                MethodAttributeValueIndex.Add(0);
+                                    LeanCLRMethodAttributeHits.Add(AttributeType);
+                                }
+                            }
+                        }
 
-                                MethodAttribute++;
+                        if (LeanCLRMethodAttributeHits != null && LeanCLRMethodAttributeHits.Count > 0)
+                        {
+                            // Emit in candidate-table order so the arrays handed to C++ keep the order
+                            // the per-candidate loop produced.
+                            foreach (var CandidateType in LeanCLRMethodAttributeCandidates)
+                            {
+                                if (LeanCLRMethodAttributeHits.Contains(CandidateType))
+                                {
+                                    MethodAttributes.Add(CandidateType);
+
+                                    MethodAttributeValueIndex.Add(0);
+
+                                    MethodAttribute++;
+                                }
                             }
                         }
                     }
