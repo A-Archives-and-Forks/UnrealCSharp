@@ -142,6 +142,22 @@ namespace Interop
             return StringToMethod.TryGetValue(InName, out var Method) ? Method : nint.Zero;
         }
 
+        // Lazy resolution slot for the Script.Library.* bridges. Under LEANCLR those entry points are
+        // plain [DllImport] declarations resolved by the runtime; Mono/CoreCLR instead hold a function
+        // pointer that has to be looked up on first use. Keeping the "resolve once" check here lets the
+        // two backends share one call-site form -- see Script/UE/Library/*.cs, where each bridge is a
+        // property over its own slot instead of ~200 copies of the same #if !LEANCLR block.
+        // A miss leaves the slot zero and is retried on the next call, exactly as the inlined check did.
+        public static nint Resolve(ref nint InSlot, string InName)
+        {
+            if (InSlot == nint.Zero)
+            {
+                InSlot = GetMethod(InName);
+            }
+
+            return InSlot;
+        }
+
         private static object GetValue(nint InHandle, Type InType)
         {
             var Type = Nullable.GetUnderlyingType(InType) ?? InType;
