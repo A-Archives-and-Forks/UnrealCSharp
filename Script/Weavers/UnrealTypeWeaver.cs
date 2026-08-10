@@ -4,6 +4,7 @@ using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Rocks;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.IO;
 
@@ -224,10 +225,41 @@ namespace Weavers
         }
 
         /// <summary>
+        /// Escapes one field of the __&lt;Name&gt;_Attrs payload so that the separators stay unambiguous.
+        /// Attribute arguments are arbitrary user strings: a Category, DisplayName or ToolTip may
+        /// legitimately contain '|' or a line break, which used to run straight into the payload and
+        /// silently shift every following field when Utils.cs split it back apart.
+        /// Round-trip partner: Utils.cs DecodeAttributeField (LEANCLR branch).
+        /// </summary>
+        private static string EncodeAttributeField(string Value)
+        {
+            if (string.IsNullOrEmpty(Value))
+            {
+                return string.Empty;
+            }
+
+            // Backslash first, otherwise the escapes introduced below would be escaped again.
+            return Value
+                .Replace("\\", "\\\\")
+                .Replace("|", "\\p")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n");
+        }
+
+        /// <summary>
         /// For each [UProperty], emit a __&lt;Name&gt;_Attrs static readonly string field that encodes
         /// all companion attributes (Script.Dynamic namespace, excluding UPropertyAttribute itself)
         /// so that the LeanCLR Utils.cs path can recover them when PropertyInfo.CustomAttributes is broken.
-        /// Encoding: one attribute per line, "FullTypeName|arg0|arg1|..." (no '|' if zero ctor args).
+        ///
+        /// Encoding: one attribute per line ('\n'), fields separated by '|':
+        ///     "FullTypeName|argCount|arg0|arg1|..."
+        /// Every field is escaped by EncodeAttributeField, so no raw '|' or line break can occur inside
+        /// a field. argCount is written explicitly and re-checked on the parse side, which turns any
+        /// residual framing problem (e.g. a stale assembly built by an older weaver) into a skipped
+        /// line instead of a silently wrong attribute set.
+        ///
+        /// The only consumer of this payload is Utils.cs GetClassPropertiesImplementation (LEANCLR),
+        /// so the format is private to that pair -- nothing native reads it.
         /// </summary>
         private void EmitCompanionAttributeField(TypeDefinition Type, PropertyDefinition Property)
         {
@@ -244,19 +276,44 @@ namespace Weavers
                     continue;
                 }
 
-                var line = attrType.FullName;
+                var values = new List<string>();
 
                 if (attr.HasConstructorArguments)
                 {
                     foreach (var arg in attr.ConstructorArguments)
                     {
-                        line += "|";
-                        // CustomAttributeArgument.Value: for strings, it's the UTF8 string directly;
-                        // for enums (e.g. ELifetimeCondition), it's the underlying int.
-                        // Both ToString() safely in Cecil context.
+                        // CustomAttributeArgument.Value: for strings it is the string itself; for enums
+                        // (e.g. ELifetimeCondition) it is the underlying integer. Format through the
+                        // invariant culture so the payload never depends on the build machine's locale
+                        // (harmless for the integers we see today, mandatory the day a float argument
+                        // appears -- "0.5" vs "0,5" would otherwise reach the runtime parse).
                         var val = arg.Value;
-                        line += val != null ? val.ToString() : string.Empty;
+
+                        string text;
+
+                        if (val == null)
+                        {
+                            text = string.Empty;
+                        }
+                        else if (val is IFormattable formattable)
+                        {
+                            text = formattable.ToString(null, CultureInfo.InvariantCulture);
+                        }
+                        else
+                        {
+                            text = val.ToString();
+                        }
+
+                        values.Add(EncodeAttributeField(text));
                     }
+                }
+
+                var line = EncodeAttributeField(attrType.FullName) + "|" +
+                           values.Count.ToString(CultureInfo.InvariantCulture);
+
+                foreach (var value in values)
+                {
+                    line += "|" + value;
                 }
 
                 lines.Add(line);

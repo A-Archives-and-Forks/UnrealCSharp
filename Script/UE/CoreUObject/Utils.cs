@@ -110,6 +110,76 @@ namespace Script.CoreUObject
 
             return LeanCLRUETypesByFullName.TryGetValue(InFullName, out var Result) ? Result : null;
         }
+
+        // Round-trip partner of the weaver's EncodeAttributeField. Attribute arguments are arbitrary
+        // user strings (a Category / DisplayName / ToolTip may contain '|' or a line break), so the
+        // weaver escapes them and this undoes it.
+        private static string LeanCLRDecodeAttributeField(string InValue)
+        {
+            if (string.IsNullOrEmpty(InValue) || InValue.IndexOf('\\') < 0)
+            {
+                return InValue;
+            }
+
+            var Result = new StringBuilder(InValue.Length);
+
+            for (var i = 0; i < InValue.Length; i++)
+            {
+                if (InValue[i] != '\\' || i + 1 >= InValue.Length)
+                {
+                    Result.Append(InValue[i]);
+
+                    continue;
+                }
+
+                i++;
+
+                switch (InValue[i])
+                {
+                    case '\\': Result.Append('\\'); break;
+                    case 'p': Result.Append('|'); break;
+                    case 'r': Result.Append('\r'); break;
+                    case 'n': Result.Append('\n'); break;
+
+                    // Unknown escape: keep both characters rather than dropping data.
+                    default:
+                        Result.Append('\\');
+                        Result.Append(InValue[i]);
+                        break;
+                }
+            }
+
+            return Result.ToString();
+        }
+
+        // Parses the payload's argument-count field. Deliberately hand-rolled instead of int.TryParse:
+        // that routes through NumberFormatInfo / culture data, and leanclr only implements the Win32
+        // NLS path -- the same trap that made the culture-sensitive StartsWith overloads silently fail
+        // on POSIX targets (see the StringComparison.Ordinal note in GetClassPropertiesImplementation).
+        // The field is always plain ASCII digits, so no culture is involved at all.
+        private static bool LeanCLRTryParseCount(string InValue, out int OutCount)
+        {
+            OutCount = 0;
+
+            if (string.IsNullOrEmpty(InValue) || InValue.Length > 9)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < InValue.Length; i++)
+            {
+                var Digit = InValue[i] - '0';
+
+                if (Digit < 0 || Digit > 9)
+                {
+                    return false;
+                }
+
+                OutCount = OutCount * 10 + Digit;
+            }
+
+            return true;
+        }
 #endif
 
         public static string GetPathName(Type InType) => InType.GetCustomAttribute<PathNameAttribute>(true)?.PathName;
@@ -378,8 +448,36 @@ namespace Script.CoreUObject
                                     continue;
                                 }
 
+                                // Payload framing (written by the weaver's EmitCompanionAttributeField):
+                                //   "FullTypeName|argCount|arg0|arg1|..."   -- every field escaped
+                                // Splitting on '|' is safe because escaping guarantees no raw '|'
+                                // survives inside a field. argCount is then re-checked against the
+                                // actual field count: a mismatch means the payload was framed by a
+                                // different weaver version, and skipping the line is far better than
+                                // handing C++ a shifted attribute/value pairing it cannot detect.
                                 var Parts = Line.Split('|');
-                                var TypeFullName = Parts[0];
+
+                                int ValueCount;
+
+                                if (Parts.Length == 1)
+                                {
+                                    // Pre-P8.7 payload: bare type name, no count, no arguments. Every
+                                    // payload produced before this change has this shape, so accepting
+                                    // it keeps a stale Game.dll working instead of silently dropping
+                                    // its attributes.
+                                    ValueCount = 0;
+                                }
+                                else if (LeanCLRTryParseCount(Parts[1], out ValueCount) &&
+                                         Parts.Length - 2 == ValueCount)
+                                {
+                                    // Well-formed current payload.
+                                }
+                                else
+                                {
+                                    continue;
+                                }
+
+                                var TypeFullName = LeanCLRDecodeAttributeField(Parts[0]);
 
                                 // Type.GetType misses every time on leanclr (measured in-editor:
                                 // getType=0, dictionary=75), so the dictionary is the real lookup
@@ -394,14 +492,10 @@ namespace Script.CoreUObject
 
                                 PropertyAttributes.Add(AttrType);
 
-                                var ValueCount = Parts.Length - 1;
-
-                                if (ValueCount > 0)
+                                for (var v = 0; v < ValueCount; v++)
                                 {
-                                    for (var v = 1; v < Parts.Length; v++)
-                                    {
-                                        PropertyAttributeValues.Add(Parts[v]);
-                                    }
+                                    PropertyAttributeValues.Add(
+                                        LeanCLRDecodeAttributeField(Parts[v + 2]));
                                 }
 
                                 PropertyAttributeIndex.Add(ValueCount);
