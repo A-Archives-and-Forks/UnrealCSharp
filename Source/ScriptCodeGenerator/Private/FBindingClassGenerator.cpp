@@ -855,32 +855,32 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 			);
 		}
 
+		// Mono/CoreCLR: the binding is a raw native pointer that has to be resolved on first use.
+		// The slot is nint rather than the function pointer type so the "resolve once, retry on miss"
+		// rule can live in MethodBridge.Resolve instead of being re-emitted at every single binding
+		// (P8.14). Same reason as the hand-written Script/UE/Library bridges (P8.8), except those need
+		// a property because their method bodies are shared between the two backends -- here the
+		// generator emits different text per backend, so a property would only add one getter per
+		// binding for nothing. The function pointer expression is still evaluated before the
+		// arguments, so a constructor's HandleData.Alloc(InObject) runs after the resolve, as before.
 		return FString::Printf(TEXT(
-			"\t\tprivate static unsafe %s %s;\n"
+			"\t\tprivate static nint %s;\n"
 			"\n"
 			"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
 			"\t\t{\n"
-			"\t\t\tif (%s == null)\n"
-			"\t\t\t{\n"
-			"\t\t\t\t%s = (%s)MethodBridge.GetMethod(\"%s.%s::%s\");\n"
-			"\t\t\t}\n"
-			"\n"
-			"\t\t\t%s(%s%s%s);\n"
+			"\t\t\t((%s)MethodBridge.Resolve(ref %s, \"%s.%s::%s\"))(%s%s%s);\n"
 			"\t\t}\n"
 		),
-		                       *Signature,
 		                       *MethodName,
 		                       *InMethodName,
 		                       *InType,
 		                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
 		                       *InParam,
-		                       *MethodName,
-		                       *MethodName,
 		                       *Signature,
+		                       *MethodName,
 		                       *ImplementationNameSpaceContent,
 		                       *ClassImplementationContent,
 		                       *InMethodName,
-		                       *MethodName,
 		                       *ObjectParam,
 		                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
 		                       *InReturn
