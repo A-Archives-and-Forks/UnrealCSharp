@@ -2,7 +2,6 @@
 #include "CoreMacro/Macro.h"
 #include "CoreMacro/ClassMacro.h"
 #include "CoreMacro/FunctionMacro.h"
-#include "CoreMacro/PropertyMacro.h"
 #include "Domain/Script/IScriptDomain.h"
 #include "Reflection/FReflectionRegistry.h"
 #include "Template/TGetArrayLength.inl"
@@ -508,17 +507,12 @@ void FClassReflection::Deinitialize()
 	{
 		if (const auto ScriptDomain = IScriptDomain::Get())
 		{
-			if (bMethodsLoaded && !bIsEnum)
-			{
-				uint32 Value{};
-
-				ScriptDomain->SetFieldStaticValue(ManagedClass,
-				                                  bIsClass
-					                                  ? PROPERTY_STATIC_CLASS_SINGLETON
-					                                  : PROPERTY_STATIC_STRUCT_SINGLETON,
-				                                  &Value);
-			}
-
+			// No singleton reset here on purpose. Every FClassReflection is destroyed by
+			// FReflectionRegistry::Deinitialize, which the three backends call as the first statement of
+			// UnloadAssembly() — immediately before Interop.AssemblyLoader.Unload() clears every registered
+			// StaticClassSingleton / StaticStructSingleton. Resetting per type at this instant would only
+			// repeat that work. Per-type resets, which happen while the domain keeps running, belong to
+			// FClassDescriptor::Deinitialize.
 			ScriptDomain->Free(ManagedClass);
 		}
 
