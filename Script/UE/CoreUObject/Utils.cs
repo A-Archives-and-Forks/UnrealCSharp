@@ -15,59 +15,8 @@ namespace Script.CoreUObject
 #if LEANCLR
         // Everything in this region is process-wide and immutable once built: the UE assembly is
         // never unloaded on this backend (there is no collectible ALC, see AssemblyLoader.Unload),
-        // so a type set derived from it cannot go stale. Before P8.6 these were rebuilt for EVERY
-        // class the reflection layer resolved, each rebuild walking all ~17k UE.dll types.
-        private static List<Type> LeanCLRAttributeCandidates;
-
-        private static HashSet<Type> LeanCLRAttributeCandidateSet;
-
+        // so a type map derived from it cannot go stale.
         private static Dictionary<string, Type> LeanCLRUETypesByFullName;
-
-        // Candidates = OverrideAttribute plus every Attribute in the UClassAttribute namespace.
-        // Measured on this project: 256 entries. The set is what the C++ side can consume
-        // (FReflectionRegistry exposes 254 distinct Get*AttributeClass() accessors), so it must
-        // NOT be narrowed to the attributes a particular game happens to use today.
-        private static void LeanCLREnsureAttributeCandidates()
-        {
-            if (LeanCLRAttributeCandidates != null)
-            {
-                return;
-            }
-
-            var Candidates = new List<Type>();
-
-            var OverrideAttributeType = typeof(OverrideAttribute);
-
-            Candidates.Add(OverrideAttributeType);
-
-            var CandidateNamespace = typeof(UClassAttribute).Namespace;
-
-            Type[] CandidateTypes;
-
-            try
-            {
-                CandidateTypes = typeof(UClassAttribute).Assembly.GetTypes();
-            }
-            catch (ReflectionTypeLoadException ReflectionTypeLoadException)
-            {
-                CandidateTypes = ReflectionTypeLoadException.Types;
-            }
-
-            foreach (var CandidateType in CandidateTypes)
-            {
-                if (CandidateType != null && CandidateType != OverrideAttributeType &&
-                    CandidateType.Namespace == CandidateNamespace &&
-                    typeof(Attribute).IsAssignableFrom(CandidateType))
-                {
-                    Candidates.Add(CandidateType);
-                }
-            }
-
-            LeanCLRAttributeCandidateSet = new HashSet<Type>(Candidates);
-
-            // Assign last: this field doubles as the "built" flag for both collections.
-            LeanCLRAttributeCandidates = Candidates;
-        }
 
         // Replaces a full UEAssembly.GetTypes().FirstOrDefault(...) scan per unresolved name.
         // First-wins insertion so lookups match what FirstOrDefault returned.
@@ -728,9 +677,7 @@ namespace Script.CoreUObject
             {
                 var UClassAttributeNamespace = typeof(UClassAttribute).Namespace;
 
-#if !LEANCLR
                 var OverrideAttributeTypeFullName = typeof(OverrideAttribute).FullName;
-#endif
 
                 var Constructors = InType.GetConstructors(
                     BindingFlags.Instance |
@@ -851,71 +798,40 @@ namespace Script.CoreUObject
 
                 var MethodAttributeValues = new List<string>();
 
-#if LEANCLR
-                LeanCLREnsureAttributeCandidates();
-
-                var LeanCLRMethodAttributeCandidates = LeanCLRAttributeCandidates;
-
-                HashSet<Type> LeanCLRMethodAttributeHits = null;
-#endif
-
                 for (var i = 0; i < OutMethodInfos.Length; i++)
                 {
                     var MethodAttribute = 0;
 
-#if LEANCLR
-                    if (OutMethodInfos[i] is MethodInfo LeanCLRMethodInfo)
-                    {
-                        // Ask each applied attribute which candidates it satisfies, rather than asking
-                        // all 256 candidates whether they are applied. IsDefined(C, false) is true iff
-                        // some attribute applied directly to this member has a type assignable to C, so
-                        // walking each applied type's base chain reproduces the same answer set exactly
-                        // -- including the base entries that make a [UFunction] method also report
-                        // OverrideAttribute (6 of the 256 candidates derive from it).
-                        //
-                        // This reads MethodInfo.CustomAttributes, which is NOT new API surface on this
-                        // backend: the UFunction scan above already enumerates it for every method, and
-                        // it was measured working on leanclr (P6 doc 5.18, 'Test' CA.Count=1). Only the
-                        // PropertyInfo side is broken there, which is why properties still go through
-                        // the woven __<Name> fields.
-                        //
-                        // Measured over UE.dll + Game.dll: 82149376 IsDefined calls -> 74788 applied
-                        // attribute visits (-99.9%), with 0 differences in the emitted sequence.
-                        LeanCLRMethodAttributeHits?.Clear();
-
-                        foreach (var CustomAttribute in LeanCLRMethodInfo.CustomAttributes)
-                        {
-                            for (var AttributeType = CustomAttribute.AttributeType;
-                                 AttributeType != null;
-                                 AttributeType = AttributeType.BaseType)
-                            {
-                                if (LeanCLRAttributeCandidateSet.Contains(AttributeType))
-                                {
-                                    LeanCLRMethodAttributeHits ??= new HashSet<Type>();
-
-                                    LeanCLRMethodAttributeHits.Add(AttributeType);
-                                }
-                            }
-                        }
-
-                        if (LeanCLRMethodAttributeHits != null && LeanCLRMethodAttributeHits.Count > 0)
-                        {
-                            // Emit in candidate-table order so the arrays handed to C++ keep the order
-                            // the per-candidate loop produced.
-                            foreach (var CandidateType in LeanCLRMethodAttributeCandidates)
-                            {
-                                if (LeanCLRMethodAttributeHits.Contains(CandidateType))
-                                {
-                                    MethodAttributes.Add(CandidateType);
-
-                                    MethodAttributeValueIndex.Add(0);
-
-                                    MethodAttribute++;
-                                }
-                            }
-                        }
-                    }
-#else
+                    // One path for all three backends. The method side does NOT need the leanclr
+                    // workaround the property side still needs: MethodInfo.CustomAttributes is
+                    // complete on leanclr (P8.6 verified it against the per-candidate IsDefined loop
+                    // on a live backend, 5166 methods / 0 differences), and CustomAttributeData
+                    // .ConstructorArguments is already exercised there by GetClassDescriptorImplementation
+                    // above -- every proxy class is resolved through its [PathName] argument (16005
+                    // occurrences in the compiled surface). Only PropertyInfo's attribute surface is
+                    // broken on that backend, which is why properties keep reading the woven
+                    // __<Name>_Attrs fields instead.
+                    //
+                    // Before this, LEANCLR ran a separate branch that probed a 256-entry candidate
+                    // table and recorded 0 values per hit, so any argument-carrying method attribute
+                    // ([ToolTip("..")], [Category("..")], ...) reached C++ with an empty value and
+                    // SetFieldMetaData wrote empty metadata. Two deltas came with unifying it, both
+                    // measured over UE.dll + Game.dll:
+                    //   - constructor arguments are now delivered (the point of the change);
+                    //   - the candidate loop also emitted base-class matches, because IsDefined(C)
+                    //     is true for types derived from C. On methods that could only ever add
+                    //     OverrideAttribute: of the 5 candidates that derive from another candidate,
+                    //     only UFunctionAttribute is usable on a method ([AttributeUsage] confines
+                    //     UClass/UEnum/UStruct/KismetHideOverrides to classes). Those 365 extra
+                    //     entries all sat on methods that still report UFunctionAttribute, and the
+                    //     sole consumer of OverrideAttribute is
+                    //     FMethodReflection's "bIsOverride = bIsUFunction || HasAttribute(Override)",
+                    //     which the first term already satisfies.
+                    //
+                    // Value.ToString() cannot hit culture data here: none of the 77 method-usable
+                    // candidates has a non-string constructor parameter, so an argument on this path
+                    // is always already a string (see the LeanCLRTryParseCount note for why that
+                    // matters on this backend).
                     foreach (var CustomAttribute in OutMethodInfos[i].CustomAttributes)
                     {
                         if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace ||
@@ -938,7 +854,6 @@ namespace Script.CoreUObject
                             MethodAttribute++;
                         }
                     }
-#endif
 
                     OutMethodAttributeCounts[i] = MethodAttribute;
                 }
