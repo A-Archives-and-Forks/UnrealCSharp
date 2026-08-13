@@ -237,11 +237,17 @@ void FClassGenerator::Generator(const UClass* InClass)
 	FunctionContent = FString::Printf(TEXT(
 		"\t\tpublic%s static UClass StaticClass()\n"
 		"\t\t{\n"
-		"\t\t\treturn StaticClassSingleton \?\?= UObjectImplementation.UObject_StaticClassImplementation(\"%s\");\n"
+		// P8.12: hand the type to the registry the first time a wrapper is actually cached, so teardown
+		// resets only the types that were used instead of sweeping every proxy type (measured 4356.99 ms
+		// per teardown on the LeanCLR interpreter). The ??= short-circuits, so this runs once per type.
+		// Interop is spelled out because not every generated proxy file imports it.
+		"\t\t\treturn StaticClassSingleton \?\?= (UClass)Interop.AssemblyLoader.RegisterStaticClassSingleton(\n"
+		"\t\t\t\ttypeof(%s), UObjectImplementation.UObject_StaticClassImplementation(\"%s\"));\n"
 		"\t\t}\n\n"
 		"\t\tprivate static UClass StaticClassSingleton { get; set; }\n"
 	),
 	                                  SuperClass != nullptr ? TEXT(" new") : TEXT(""),
+	                                  *ClassContent,
 	                                  *PathNameAttributeContent
 	);
 

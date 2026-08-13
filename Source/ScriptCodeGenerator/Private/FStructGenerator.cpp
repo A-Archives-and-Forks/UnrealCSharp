@@ -139,11 +139,14 @@ void FStructGenerator::Generator(const UScriptStruct* InScriptStruct)
 	auto StaticStructContent = FString::Printf(TEXT(
 		"\t\tpublic%s static UScriptStruct StaticStruct()\n"
 		"\t\t{\n"
-		"\t\t\treturn StaticStructSingleton \?\?= UStructImplementation.UStruct_StaticStructImplementation(\"%s\");\n"
+		// P8.12: see FClassGenerator -- register on first cache so teardown is O(types actually used).
+		"\t\t\treturn StaticStructSingleton \?\?= (UScriptStruct)Interop.AssemblyLoader.RegisterStaticStructSingleton(\n"
+		"\t\t\t\ttypeof(%s), UStructImplementation.UStruct_StaticStructImplementation(\"%s\"));\n"
 		"\t\t}\n\n"
 		"\t\tprivate static UScriptStruct StaticStructSingleton { get; set; }\n"
 	),
 	                                           SuperStruct != nullptr ? TEXT(" new") : TEXT(""),
+	                                           *ClassContent,
 	                                           *PathNameAttributeContent
 	);
 

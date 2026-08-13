@@ -755,6 +755,11 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 
 	auto ClassImplementationContent = BINDING_COMBINE_CLASS_IMPLEMENTATION(ClassContent);
 
+	// LeanCLR 后端无法对裸原生指针做非托管 calli，改为把绑定发成具名 [DllImport]，
+	// 宿主侧按 C# 声明全名注册成 P/Invoke（见 FLeanCLRDomain::RegisterPInvokes）。
+	// 选项 A（后端感知）：仅 LeanCLR 目标改形态，Mono/CoreCLR 保持 calli，零回归。
+	const auto bLeanCLR = FUnrealCSharpFunctionLibrary::GetScriptDomainType() == EScriptDomainType::LeanCLR;
+
 	FString FunctionContent;
 
 	auto GetFunctionDeclaration = [&](
@@ -808,32 +813,74 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 			ObjectParam = TEXT("HandleData.Alloc(InObject)");
 		}
 
+		if (bLeanCLR)
+		{
+			// 构造：需保留 InObject -> 句柄 的 HandleData.Alloc 转换，故拆成
+			// 私有 extern(nint,...)（名字 = InMethodName，与注册 key 匹配）+ 同名对象入参重载包装。
+			if (bIsConstructor)
+			{
+				return FString::Printf(TEXT(
+					"\t\t[DllImport(\"__UnrealCSharpLeanCLR\", CallingConvention = CallingConvention.Cdecl)]\n"
+					"\t\tprivate static extern unsafe void %s(nint InObject%s%s);\n"
+					"\n"
+					"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
+					"\t\t{\n"
+					"\t\t\t%s(%s%s%s);\n"
+					"\t\t}\n"
+				),
+				                       *InMethodName,
+				                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
+				                       *InParam,
+				                       *InMethodName,
+				                       *InType,
+				                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
+				                       *InParam,
+				                       *InMethodName,
+				                       *ObjectParam,
+				                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
+				                       *InReturn
+				);
+			}
+
+			// 非构造（含 property/subscript get/set）：公共方法本身即 extern，
+			// 签名 (nint InObject, <InParam>) 与原生一致，方法名 = InMethodName。
+			return FString::Printf(TEXT(
+				"\t\t[DllImport(\"__UnrealCSharpLeanCLR\", CallingConvention = CallingConvention.Cdecl)]\n"
+				"\t\tpublic static extern unsafe void %s(%s InObject%s%s);\n"
+			),
+			                       *InMethodName,
+			                       *InType,
+			                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
+			                       *InParam
+			);
+		}
+
+		// Mono/CoreCLR: the binding is a raw native pointer that has to be resolved on first use.
+		// The slot is nint rather than the function pointer type so the "resolve once, retry on miss"
+		// rule can live in MethodBridge.Resolve instead of being re-emitted at every single binding
+		// (P8.14). Same reason as the hand-written Script/UE/Library bridges (P8.8), except those need
+		// a property because their method bodies are shared between the two backends -- here the
+		// generator emits different text per backend, so a property would only add one getter per
+		// binding for nothing. The function pointer expression is still evaluated before the
+		// arguments, so a constructor's HandleData.Alloc(InObject) runs after the resolve, as before.
 		return FString::Printf(TEXT(
-			"\t\tprivate static unsafe %s %s;\n"
+			"\t\tprivate static nint %s;\n"
 			"\n"
 			"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
 			"\t\t{\n"
-			"\t\t\tif (%s == null)\n"
-			"\t\t\t{\n"
-			"\t\t\t\t%s = (%s)MethodBridge.GetMethod(\"%s.%s::%s\");\n"
-			"\t\t\t}\n"
-			"\n"
-			"\t\t\t%s(%s%s%s);\n"
+			"\t\t\t((%s)MethodBridge.Resolve(ref %s, \"%s.%s::%s\"))(%s%s%s);\n"
 			"\t\t}\n"
 		),
-		                       *Signature,
 		                       *MethodName,
 		                       *InMethodName,
 		                       *InType,
 		                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
 		                       *InParam,
-		                       *MethodName,
-		                       *MethodName,
 		                       *Signature,
+		                       *MethodName,
 		                       *ImplementationNameSpaceContent,
 		                       *ClassImplementationContent,
 		                       *InMethodName,
-		                       *MethodName,
 		                       *ObjectParam,
 		                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
 		                       *InReturn
@@ -1003,6 +1050,11 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 	}
 
 	UsingNameSpaceContent += TEXT("using Interop;\n");
+
+	if (bLeanCLR)
+	{
+		UsingNameSpaceContent += TEXT("using System.Runtime.InteropServices;\n");
+	}
 
 	for (const auto& UsingNameSpace : UsingNameSpaces)
 	{

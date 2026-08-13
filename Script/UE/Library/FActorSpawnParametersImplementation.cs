@@ -1,99 +1,111 @@
 using Interop;
+#if LEANCLR
+using System.Runtime.InteropServices;
+#endif
 
 namespace Script.Library
 {
     public static partial class FActorSpawnParametersImplementation
     {
-        private static unsafe delegate* unmanaged[Cdecl]<nint, byte> __FActorSpawnParameters_GetbNoFailImplementation;
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe byte __FActorSpawnParameters_GetbNoFailImplementation(nint A0);
+#else
+        private static nint __FActorSpawnParameters_GetbNoFailImplementation_Slot;
+        private static unsafe delegate* unmanaged[Cdecl]<nint, byte> __FActorSpawnParameters_GetbNoFailImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_GetbNoFailImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbNoFailImplementation");
+#endif
 
         public static unsafe bool FActorSpawnParameters_GetbNoFailImplementation(nint InObject)
         {
-            if (__FActorSpawnParameters_GetbNoFailImplementation == null)
-            {
-                __FActorSpawnParameters_GetbNoFailImplementation = (delegate* unmanaged[Cdecl]<nint, byte>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbNoFailImplementation");
-            }
-
             return __FActorSpawnParameters_GetbNoFailImplementation(InObject) != 0;
         }
 
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe void __FActorSpawnParameters_SetbNoFailImplementation(nint A0, byte A1);
+#else
+        private static nint __FActorSpawnParameters_SetbNoFailImplementation_Slot;
         private static unsafe delegate* unmanaged[Cdecl]<nint, byte, void>
-            __FActorSpawnParameters_SetbNoFailImplementation;
+            __FActorSpawnParameters_SetbNoFailImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte, void>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_SetbNoFailImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbNoFailImplementation");
+#endif
 
         public static unsafe void FActorSpawnParameters_SetbNoFailImplementation(nint InObject, bool InValue)
         {
-            if (__FActorSpawnParameters_SetbNoFailImplementation == null)
-            {
-                __FActorSpawnParameters_SetbNoFailImplementation = (delegate* unmanaged[Cdecl]<nint, byte, void>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbNoFailImplementation");
-            }
-
             __FActorSpawnParameters_SetbNoFailImplementation(InObject, (byte)(InValue ? 1 : 0));
         }
 
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe byte __FActorSpawnParameters_GetbDeferConstructionImplementation(nint A0);
+#else
+        private static nint __FActorSpawnParameters_GetbDeferConstructionImplementation_Slot;
         private static unsafe delegate* unmanaged[Cdecl]<nint, byte>
-            __FActorSpawnParameters_GetbDeferConstructionImplementation;
+            __FActorSpawnParameters_GetbDeferConstructionImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_GetbDeferConstructionImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbDeferConstructionImplementation");
+#endif
 
         public static unsafe bool FActorSpawnParameters_GetbDeferConstructionImplementation(nint InObject)
         {
-            if (__FActorSpawnParameters_GetbDeferConstructionImplementation == null)
-            {
-                __FActorSpawnParameters_GetbDeferConstructionImplementation = (delegate* unmanaged[Cdecl]<nint, byte>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbDeferConstructionImplementation");
-            }
-
             return __FActorSpawnParameters_GetbDeferConstructionImplementation(InObject) != 0;
         }
 
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe void __FActorSpawnParameters_SetbDeferConstructionImplementation(nint A0, byte A1);
+#else
+        private static nint __FActorSpawnParameters_SetbDeferConstructionImplementation_Slot;
         private static unsafe delegate* unmanaged[Cdecl]<nint, byte, void>
-            __FActorSpawnParameters_SetbDeferConstructionImplementation;
+            __FActorSpawnParameters_SetbDeferConstructionImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte, void>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_SetbDeferConstructionImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbDeferConstructionImplementation");
+#endif
 
         public static unsafe void FActorSpawnParameters_SetbDeferConstructionImplementation(nint InObject, bool InValue)
         {
-            if (__FActorSpawnParameters_SetbDeferConstructionImplementation == null)
-            {
-                __FActorSpawnParameters_SetbDeferConstructionImplementation =
-                    (delegate* unmanaged[Cdecl]<nint, byte, void>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbDeferConstructionImplementation");
-            }
-
             __FActorSpawnParameters_SetbDeferConstructionImplementation(InObject, (byte)(InValue ? 1 : 0));
         }
 
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe byte __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation(nint A0);
+#else
+        private static nint __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation_Slot;
         private static unsafe delegate* unmanaged[Cdecl]<nint, byte>
-            __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation;
+            __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation");
+#endif
 
         public static unsafe bool FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation(nint InObject)
         {
-            if (__FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation == null)
-            {
-                __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation =
-                    (delegate* unmanaged[Cdecl]<nint, byte>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation");
-            }
-
             return __FActorSpawnParameters_GetbAllowDuringConstructionScriptImplementation(InObject) != 0;
         }
 
+#if LEANCLR
+        [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe void __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation(nint A0, byte A1);
+#else
+        private static nint __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation_Slot;
         private static unsafe delegate* unmanaged[Cdecl]<nint, byte, void>
-            __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation;
+            __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation =>
+            (delegate* unmanaged[Cdecl]<nint, byte, void>)MethodBridge.Resolve(
+                ref __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation_Slot,
+                "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation");
+#endif
 
         public static unsafe void FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation(nint InObject,
             bool InValue)
         {
-            if (__FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation == null)
-            {
-                __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation =
-                    (delegate* unmanaged[Cdecl]<nint, byte, void>)
-                    MethodBridge.GetMethod(
-                        "Script.Library.FActorSpawnParametersImplementation::FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation");
-            }
-
             __FActorSpawnParameters_SetbAllowDuringConstructionScriptImplementation(InObject, (byte)(InValue ? 1 : 0));
         }
     }

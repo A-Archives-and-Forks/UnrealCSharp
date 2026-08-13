@@ -39,7 +39,24 @@ public static class FieldBridge
 
             if (Name.Length > 0)
             {
-                return Type.GetField(Name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                const BindingFlags BindingFlag = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+                var Field = Type.GetField(Name, BindingFlag);
+
+                if (Field != null)
+                {
+                    return Field;
+                }
+
+                // The native side names a member the way C# declares it, but a static auto-property owns no
+                // field of that name: its only storage is the compiler-generated "<Name>k__BackingField".
+                // Resolving it here is what lets FClassDescriptor::Deinitialize actually clear the generated
+                // StaticClassSingleton / StaticStructSingleton (emitted as `{ get; set; }`) when the UStruct
+                // behind a type goes away; asking for the declared name alone silently wrote nothing.
+                // Knowledge of the mangling belongs on this side of the bridge, not in the native names.
+                // Every other caller (FCSharpBind's FieldHash writes, FDynamicEnumGenerator's enum literal
+                // reads) names a real field, so it returns above and never reaches this line.
+                return Type.GetField($"<{Name}>k__BackingField", BindingFlag);
             }
         }
 

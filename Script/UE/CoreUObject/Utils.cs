@@ -12,6 +12,125 @@ namespace Script.CoreUObject
 {
     public static class Utils
     {
+#if LEANCLR
+        // Everything in this region is process-wide and immutable once built: the UE assembly is
+        // never unloaded on this backend (there is no collectible ALC, see AssemblyLoader.Unload),
+        // so a type map derived from it cannot go stale.
+        private static Dictionary<string, Type> LeanCLRUETypesByFullName;
+
+        // Replaces a full UEAssembly.GetTypes().FirstOrDefault(...) scan per unresolved name.
+        // First-wins insertion so lookups match what FirstOrDefault returned.
+        private static Type LeanCLRFindUETypeByFullName(string InFullName)
+        {
+            if (LeanCLRUETypesByFullName == null)
+            {
+                var Map = new Dictionary<string, Type>();
+
+                try
+                {
+                    Type[] Types;
+
+                    try
+                    {
+                        Types = typeof(UClassAttribute).Assembly.GetTypes();
+                    }
+                    catch (ReflectionTypeLoadException ReflectionTypeLoadException)
+                    {
+                        Types = ReflectionTypeLoadException.Types;
+                    }
+
+                    foreach (var Type in Types)
+                    {
+                        var FullName = Type?.FullName;
+
+                        if (FullName != null && !Map.ContainsKey(FullName))
+                        {
+                            Map[FullName] = Type;
+                        }
+                    }
+                }
+                catch
+                {
+                    // A partial map is still better than rescanning; never abort the parse.
+                }
+
+                LeanCLRUETypesByFullName = Map;
+            }
+
+            return LeanCLRUETypesByFullName.TryGetValue(InFullName, out var Result) ? Result : null;
+        }
+
+        // Round-trip partner of the weaver's EncodeAttributeField. Attribute arguments are arbitrary
+        // user strings (a Category / DisplayName / ToolTip may contain '|' or a line break), so the
+        // weaver escapes them and this undoes it.
+        private static string LeanCLRDecodeAttributeField(string InValue)
+        {
+            if (string.IsNullOrEmpty(InValue) || InValue.IndexOf('\\') < 0)
+            {
+                return InValue;
+            }
+
+            var Result = new StringBuilder(InValue.Length);
+
+            for (var i = 0; i < InValue.Length; i++)
+            {
+                if (InValue[i] != '\\' || i + 1 >= InValue.Length)
+                {
+                    Result.Append(InValue[i]);
+
+                    continue;
+                }
+
+                i++;
+
+                switch (InValue[i])
+                {
+                    case '\\': Result.Append('\\'); break;
+                    case 'p': Result.Append('|'); break;
+                    case 'r': Result.Append('\r'); break;
+                    case 'n': Result.Append('\n'); break;
+
+                    // Unknown escape: keep both characters rather than dropping data.
+                    default:
+                        Result.Append('\\');
+                        Result.Append(InValue[i]);
+                        break;
+                }
+            }
+
+            return Result.ToString();
+        }
+
+        // Parses the payload's argument-count field. Deliberately hand-rolled instead of int.TryParse:
+        // that routes through NumberFormatInfo / culture data, and leanclr only implements the Win32
+        // NLS path -- the same trap that made the culture-sensitive StartsWith overloads silently fail
+        // on POSIX targets (see the StringComparison.Ordinal note in GetClassPropertiesImplementation).
+        // The field is always plain ASCII digits, so no culture is involved at all.
+        private static bool LeanCLRTryParseCount(string InValue, out int OutCount)
+        {
+            OutCount = 0;
+
+            if (string.IsNullOrEmpty(InValue) || InValue.Length > 9)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < InValue.Length; i++)
+            {
+                var Digit = InValue[i] - '0';
+
+                if (Digit < 0 || Digit > 9)
+                {
+                    return false;
+                }
+
+                OutCount = OutCount * 10 + Digit;
+            }
+
+            return true;
+        }
+#endif
+
         public static string GetPathName(Type InType) => InType.GetCustomAttribute<PathNameAttribute>(true)?.PathName;
 
         private static Type GetType(Type InType) =>
@@ -204,6 +323,44 @@ namespace Script.CoreUObject
 
                 var PropertyAttributeValues = new List<string>();
 
+#if LEANCLR
+                var LeanCLRWovenFieldNames = new HashSet<string>();
+
+                var LeanCLRWovenAttrFields = new Dictionary<string, FieldInfo>();
+
+                try
+                {
+                    var AllFields = InType.GetFields(
+                        BindingFlags.Static | BindingFlags.Instance |
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.FlattenHierarchy);
+
+                    foreach (var Field in AllFields)
+                    {
+                        // StringComparison.Ordinal is mandatory here, do not simplify it away:
+                        // the culture-sensitive overloads route through Win32 NLS, which leanclr
+                        // only implements on Windows. On POSIX targets (Android/Linux/Mac/iOS)
+                        // FindNLSStringEx returns -1 unconditionally, so they silently return
+                        // false and every woven UProperty marker is lost.
+                        if (Field != null && Field.Name.StartsWith("__", StringComparison.Ordinal))
+                        {
+                            if (Field.Name.EndsWith("_Attrs", StringComparison.Ordinal))
+                            {
+                                LeanCLRWovenAttrFields[Field.Name] = Field;
+                            }
+                            else
+                            {
+                                LeanCLRWovenFieldNames.Add(Field.Name);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Never let field discovery abort the property parse.
+                }
+#endif
+
                 for (var i = 0; i < OutPropertyInfos.Length; i++)
                 {
                     OutPropertyNames[i] = OutPropertyInfos[i].Name;
@@ -212,6 +369,91 @@ namespace Script.CoreUObject
 
                     var PropertyAttributeCount = 0;
 
+#if LEANCLR
+                    if (LeanCLRWovenFieldNames.Contains("__" + OutPropertyInfos[i].Name))
+                    {
+                        PropertyAttributes.Add(typeof(UPropertyAttribute));
+
+                        PropertyAttributeIndex.Add(0);
+
+                        PropertyAttributeCount++;
+                    }
+
+                    // Recover companion attributes from __<Name>_Attrs woven static string fields.
+                    if (LeanCLRWovenAttrFields.TryGetValue(
+                            "__" + OutPropertyInfos[i].Name + "_Attrs", out var AttrField))
+                    {
+                        string AttrData = null;
+
+                        try { AttrData = AttrField.GetValue(null) as string; }
+                        catch { /* skip this field on any read error */ }
+
+                        if (!string.IsNullOrEmpty(AttrData))
+                        {
+                            foreach (var Line in AttrData.Split('\n'))
+                            {
+                                if (string.IsNullOrEmpty(Line))
+                                {
+                                    continue;
+                                }
+
+                                // Payload framing (written by the weaver's EmitCompanionAttributeField):
+                                //   "FullTypeName|argCount|arg0|arg1|..."   -- every field escaped
+                                // Splitting on '|' is safe because escaping guarantees no raw '|'
+                                // survives inside a field. argCount is then re-checked against the
+                                // actual field count: a mismatch means the payload was framed by a
+                                // different weaver version, and skipping the line is far better than
+                                // handing C++ a shifted attribute/value pairing it cannot detect.
+                                var Parts = Line.Split('|');
+
+                                int ValueCount;
+
+                                if (Parts.Length == 1)
+                                {
+                                    // Pre-P8.7 payload: bare type name, no count, no arguments. Every
+                                    // payload produced before this change has this shape, so accepting
+                                    // it keeps a stale Game.dll working instead of silently dropping
+                                    // its attributes.
+                                    ValueCount = 0;
+                                }
+                                else if (LeanCLRTryParseCount(Parts[1], out ValueCount) &&
+                                         Parts.Length - 2 == ValueCount)
+                                {
+                                    // Well-formed current payload.
+                                }
+                                else
+                                {
+                                    continue;
+                                }
+
+                                var TypeFullName = LeanCLRDecodeAttributeField(Parts[0]);
+
+                                // Type.GetType misses every time on leanclr (measured in-editor:
+                                // getType=0, dictionary=75), so the dictionary is the real lookup
+                                // path here rather than a rare fallback.
+                                var AttrType = Type.GetType(TypeFullName) ??
+                                               LeanCLRFindUETypeByFullName(TypeFullName);
+
+                                if (AttrType == null)
+                                {
+                                    continue;
+                                }
+
+                                PropertyAttributes.Add(AttrType);
+
+                                for (var v = 0; v < ValueCount; v++)
+                                {
+                                    PropertyAttributeValues.Add(
+                                        LeanCLRDecodeAttributeField(Parts[v + 2]));
+                                }
+
+                                PropertyAttributeIndex.Add(ValueCount);
+
+                                PropertyAttributeCount++;
+                            }
+                        }
+                    }
+#else
                     foreach (var CustomAttribute in OutPropertyInfos[i].CustomAttributes)
                     {
                         if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace)
@@ -232,6 +474,7 @@ namespace Script.CoreUObject
                             PropertyAttributeCount++;
                         }
                     }
+#endif
 
                     OutPropertyAttributeCounts[i] = PropertyAttributeCount;
                 }
@@ -293,6 +536,134 @@ namespace Script.CoreUObject
             }
         }
 
+#if LEANCLR
+        // leanclr's Type.GetMethods does not collapse overridden virtual slots: an override and the
+        // base slot it overrides BOTH appear (runtime probe: 'Test' matches=2 / total=109 on
+        // UUnitTestSubsystem, vs CoreCLR's matches=1 / total=105 on the same Game.dll). Forwarding both
+        // breaks the C++ FClassReflection.Methods TMap keyed by (name, paramCount): the base slot's
+        // entry (NewSlot, no [Override]) wins over the real override, FMethodReflection.bIsOverride
+        // stays false and FCSharpBind never binds the C# override. Collapse duplicate signatures here,
+        // keeping the most-derived declaration (the one carrying [Override]).
+        //
+        // Duplicates can only share a (Name, ParamCount) key, so bucket on that instead of rescanning
+        // every kept method: the linear scan compared each candidate against all previously kept
+        // methods, which is O(n^2) in a class's method count. Measured over UE.dll + Game.dll
+        // (14518 classes / 321888 methods): 14596382 comparisons -> 871, output identical.
+        private static MethodInfo[] LeanCLRCollapseOverriddenMethods(MethodInfo[] InMethods)
+        {
+            var Result = new List<MethodInfo>(InMethods.Length);
+
+            // Parameter types of Result[i], captured once (GetParameters allocates a fresh array on
+            // every call, and the old code re-read it for every comparison).
+            var ResultParameterTypes = new List<Type[]>(InMethods.Length);
+
+            var Buckets = new Dictionary<LeanCLRMethodSignatureKey, List<int>>();
+
+            foreach (var Candidate in InMethods)
+            {
+                var CandidateParameters = Candidate.GetParameters();
+
+                var CandidateParameterTypes = new Type[CandidateParameters.Length];
+
+                for (var ParameterIndex = 0; ParameterIndex < CandidateParameters.Length; ParameterIndex++)
+                {
+                    CandidateParameterTypes[ParameterIndex] = CandidateParameters[ParameterIndex].ParameterType;
+                }
+
+                var Key = new LeanCLRMethodSignatureKey(Candidate.Name, CandidateParameterTypes.Length);
+
+                var bDuplicate = false;
+
+                Buckets.TryGetValue(Key, out var Bucket);
+
+                if (Bucket != null)
+                {
+                    foreach (var Index in Bucket)
+                    {
+                        var ExistingParameterTypes = ResultParameterTypes[Index];
+
+                        var bSameSignature = true;
+
+                        for (var ParameterIndex = 0;
+                             ParameterIndex < ExistingParameterTypes.Length;
+                             ParameterIndex++)
+                        {
+                            if (ExistingParameterTypes[ParameterIndex] !=
+                                CandidateParameterTypes[ParameterIndex])
+                            {
+                                bSameSignature = false;
+
+                                break;
+                            }
+                        }
+
+                        if (!bSameSignature)
+                        {
+                            continue;
+                        }
+
+                        bDuplicate = true;
+
+                        var Existing = Result[Index];
+
+                        // Same name + signature = same vtable slot chain: keep the most-derived declaration.
+                        if (Existing.DeclaringType != null && Candidate.DeclaringType != null &&
+                            Existing.DeclaringType != Candidate.DeclaringType &&
+                            Existing.DeclaringType.IsAssignableFrom(Candidate.DeclaringType))
+                        {
+                            Result[Index] = Candidate;
+                        }
+
+                        break;
+                    }
+                }
+
+                if (!bDuplicate)
+                {
+                    if (Bucket == null)
+                    {
+                        Buckets[Key] = Bucket = new List<int>();
+                    }
+
+                    Bucket.Add(Result.Count);
+
+                    Result.Add(Candidate);
+
+                    ResultParameterTypes.Add(CandidateParameterTypes);
+                }
+            }
+
+            return Result.ToArray();
+        }
+
+        private readonly struct LeanCLRMethodSignatureKey : IEquatable<LeanCLRMethodSignatureKey>
+        {
+            private readonly string Name;
+
+            private readonly int ParameterCount;
+
+            public LeanCLRMethodSignatureKey(string InName, int InParameterCount)
+            {
+                Name = InName;
+
+                ParameterCount = InParameterCount;
+            }
+
+            public bool Equals(LeanCLRMethodSignatureKey InOther) =>
+                ParameterCount == InOther.ParameterCount &&
+                string.Equals(Name, InOther.Name, StringComparison.Ordinal);
+
+            public override bool Equals(object InOther) =>
+                InOther is LeanCLRMethodSignatureKey Other && Equals(Other);
+
+            // Ordinal comparison is mandatory, do not simplify it away: leanclr only implements the
+            // Win32 NLS path, so culture-sensitive string APIs silently misbehave on POSIX targets
+            // (see the StartsWith note in GetClassPropertiesImplementation). string.GetHashCode() is
+            // ordinal by contract, so it pairs correctly with the ordinal Equals above.
+            public override int GetHashCode() => (Name?.GetHashCode() ?? 0) ^ ParameterCount;
+        }
+#endif
+
         private static void GetClassMethodsImplementation(Type InType,
             out int OutMethodLength, out string[] OutMethodNames, out MethodBase[] OutMethodInfos,
             out bool[] OutMethodIsStatics, out int[] OutMethodParamCounts, out Type[] OutMethodReturnTypes,
@@ -321,6 +692,13 @@ namespace Script.CoreUObject
                         BindingFlags.NonPublic)
                     .Where(Method => !Method.IsSpecialName)
                     .ToArray();
+
+#if LEANCLR
+                // leanclr returns the base virtual AND the derived override for the same slot (see
+                // LeanCLRCollapseOverriddenMethods); collapse to the most-derived declaration so the
+                // (name, paramCount)-keyed C++ map keeps the method that actually carries [Override].
+                Methods = LeanCLRCollapseOverriddenMethods(Methods);
+#endif
 
                 var ConstructorLength = Constructors.Length;
 
@@ -424,6 +802,36 @@ namespace Script.CoreUObject
                 {
                     var MethodAttribute = 0;
 
+                    // One path for all three backends. The method side does NOT need the leanclr
+                    // workaround the property side still needs: MethodInfo.CustomAttributes is
+                    // complete on leanclr (P8.6 verified it against the per-candidate IsDefined loop
+                    // on a live backend, 5166 methods / 0 differences), and CustomAttributeData
+                    // .ConstructorArguments is already exercised there by GetClassDescriptorImplementation
+                    // above -- every proxy class is resolved through its [PathName] argument (16005
+                    // occurrences in the compiled surface). Only PropertyInfo's attribute surface is
+                    // broken on that backend, which is why properties keep reading the woven
+                    // __<Name>_Attrs fields instead.
+                    //
+                    // Before this, LEANCLR ran a separate branch that probed a 256-entry candidate
+                    // table and recorded 0 values per hit, so any argument-carrying method attribute
+                    // ([ToolTip("..")], [Category("..")], ...) reached C++ with an empty value and
+                    // SetFieldMetaData wrote empty metadata. Two deltas came with unifying it, both
+                    // measured over UE.dll + Game.dll:
+                    //   - constructor arguments are now delivered (the point of the change);
+                    //   - the candidate loop also emitted base-class matches, because IsDefined(C)
+                    //     is true for types derived from C. On methods that could only ever add
+                    //     OverrideAttribute: of the 5 candidates that derive from another candidate,
+                    //     only UFunctionAttribute is usable on a method ([AttributeUsage] confines
+                    //     UClass/UEnum/UStruct/KismetHideOverrides to classes). Those 365 extra
+                    //     entries all sat on methods that still report UFunctionAttribute, and the
+                    //     sole consumer of OverrideAttribute is
+                    //     FMethodReflection's "bIsOverride = bIsUFunction || HasAttribute(Override)",
+                    //     which the first term already satisfies.
+                    //
+                    // Value.ToString() cannot hit culture data here: none of the 77 method-usable
+                    // candidates has a non-string constructor parameter, so an argument on this path
+                    // is always already a string (see the LeanCLRTryParseCount note for why that
+                    // matters on this backend).
                     foreach (var CustomAttribute in OutMethodInfos[i].CustomAttributes)
                     {
                         if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace ||

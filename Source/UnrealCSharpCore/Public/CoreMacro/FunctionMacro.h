@@ -36,6 +36,10 @@
 
 #define FUNCTION_HANDLE_DATA_FREE FString(TEXT("Free"))
 
+#define FUNCTION_HANDLE_DATA_GET_OBJECT_POINTER FString(TEXT("GetObjectPointer"))
+
+#define FUNCTION_HANDLE_DATA_ALLOC_FROM_OBJECT FString(TEXT("AllocFromObject"))
+
 #define FUNCTION_LOG_BRIDGE_SET_LOG FString(TEXT("SetLog"))
 
 #define FUNCTION_LOG_BRIDGE_INITIALIZE FString(TEXT("Initialize"))
