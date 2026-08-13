@@ -394,6 +394,30 @@ namespace
 
 		return {};
 	}
+
+	// GetClassDescriptor / GetClassProperties / GetClassFields / GetClassMethods all marshal
+	// (handle, OutParams pointer) into a Utils.GetClass* bridge method that fills the caller-provided
+	// array with handles/counts, and all four discard the return. The bodies were identical apart from
+	// which bridge method they name, so the dance lives here once instead of four times.
+	// Only the bridge handle is checked, matching what the four call sites did -- an invalid class
+	// handle is forwarded to the managed side exactly as before.
+	void InvokeWithOutParams(const leanclr::metadata::RtMethodInfo* InMethod, const IManagedHandle InManagedClass,
+	                         PTRINT* OutParams)
+	{
+		if (InMethod == nullptr)
+		{
+			return;
+		}
+
+		FLeanCLRMarshal::FStackObject Args[2] = {
+			FLeanCLRMarshal::FromHandle(InManagedClass),
+			FLeanCLRMarshal::FromPointer(OutParams)
+		};
+
+		FLeanCLRMarshal::FStackObject Return{};
+
+		FLeanCLRMarshal::Invoke(InMethod, Args, 2, Return);
+	}
 }
 
 void FLeanCLRDomain::Initialize()
@@ -988,64 +1012,22 @@ bool FLeanCLRDomain::IsOverride(const IManagedHandle InManagedClass)
 
 void FLeanCLRDomain::GetClassDescriptor(const IManagedHandle InManagedClass, PTRINT* OutParams)
 {
-	// Utils.GetClassDescriptor(nint InTypeHandle, nint* OutBuffer): the caller-provided OutParams array is
-	// filled with handles/counts by the managed side; pass its address straight through.
-	if (Bridge.UtilsGetClassDescriptor != nullptr)
-	{
-		FLeanCLRMarshal::FStackObject Args[2] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(OutParams)
-		};
-
-		FLeanCLRMarshal::FStackObject Return{};
-
-		FLeanCLRMarshal::Invoke(Bridge.UtilsGetClassDescriptor, Args, 2, Return);
-	}
+	InvokeWithOutParams(Bridge.UtilsGetClassDescriptor, InManagedClass, OutParams);
 }
 
 void FLeanCLRDomain::GetClassProperties(const IManagedHandle InManagedClass, PTRINT* OutParams)
 {
-	if (Bridge.UtilsGetClassProperties != nullptr)
-	{
-		FLeanCLRMarshal::FStackObject Args[2] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(OutParams)
-		};
-
-		FLeanCLRMarshal::FStackObject Return{};
-
-		FLeanCLRMarshal::Invoke(Bridge.UtilsGetClassProperties, Args, 2, Return);
-	}
+	InvokeWithOutParams(Bridge.UtilsGetClassProperties, InManagedClass, OutParams);
 }
 
 void FLeanCLRDomain::GetClassFields(const IManagedHandle InManagedClass, PTRINT* OutParams)
 {
-	if (Bridge.UtilsGetClassFields != nullptr)
-	{
-		FLeanCLRMarshal::FStackObject Args[2] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(OutParams)
-		};
-
-		FLeanCLRMarshal::FStackObject Return{};
-
-		FLeanCLRMarshal::Invoke(Bridge.UtilsGetClassFields, Args, 2, Return);
-	}
+	InvokeWithOutParams(Bridge.UtilsGetClassFields, InManagedClass, OutParams);
 }
 
 void FLeanCLRDomain::GetClassMethods(const IManagedHandle InManagedClass, PTRINT* OutParams)
 {
-	if (Bridge.UtilsGetClassMethods != nullptr)
-	{
-		FLeanCLRMarshal::FStackObject Args[2] = {
-			FLeanCLRMarshal::FromHandle(InManagedClass),
-			FLeanCLRMarshal::FromPointer(OutParams)
-		};
-
-		FLeanCLRMarshal::FStackObject Return{};
-
-		FLeanCLRMarshal::Invoke(Bridge.UtilsGetClassMethods, Args, 2, Return);
-	}
+	InvokeWithOutParams(Bridge.UtilsGetClassMethods, InManagedClass, OutParams);
 }
 
 bool FLeanCLRDomain::IsInitialized() const

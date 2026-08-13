@@ -50,6 +50,32 @@ namespace
 			UE_LOG(LogUnrealCSharp, Error, TEXT("[LeanCLR] %s"), *Line);
 		}
 	}
+
+	// Run the interpreter and report a failure the one way both invoke paths need: a managed exception in
+	// full, or InFailMessage when the invoke errored without producing one (which would otherwise be
+	// silent). Returns true on success. The early return itself stays at each call site because the two
+	// callers have different return types (bool vs IManagedHandle).
+	bool InvokeRaw(const metadata::RtMethodInfo* InMethod, FLeanCLRMarshal::FStackObject* InArgs,
+	               FLeanCLRMarshal::FStackObject* OutReturn, const char* InFailMessage)
+	{
+		const auto Result = vm::Runtime::invoke_stackobject_arguments_with_run_cctor(InMethod, InArgs, OutReturn);
+
+		if (Result.is_err())
+		{
+			if (vm::RtException* Exception = vm::Exception::get_and_clear_current_exception())
+			{
+				LogManagedException(Exception);
+			}
+			else
+			{
+				FLeanCLRLog::ErrorWriter(InFailMessage);
+			}
+
+			return false;
+		}
+
+		return true;
+	}
 }
 
 const metadata::RtMethodInfo* FLeanCLRMarshal::ResolveMethod(
@@ -109,20 +135,8 @@ bool FLeanCLRMarshal::Invoke(const metadata::RtMethodInfo* InMethod,
 		}
 	}
 
-	const auto Result = vm::Runtime::invoke_stackobject_arguments_with_run_cctor(
-		InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData());
-
-	if (Result.is_err())
+	if (!InvokeRaw(InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData(), "LeanCLR: bridge invoke failed"))
 	{
-		if (vm::RtException* Exception = vm::Exception::get_and_clear_current_exception())
-		{
-			LogManagedException(Exception);
-		}
-		else
-		{
-			FLeanCLRLog::ErrorWriter("LeanCLR: bridge invoke failed");
-		}
-
 		return false;
 	}
 
@@ -444,20 +458,8 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 	TArray<FStackObject> ReturnBuffer;
 	ReturnBuffer.SetNumZeroed(ReturnSlots == 0 ? 1 : static_cast<int32>(ReturnSlots));
 
-	const auto InvokeResult = vm::Runtime::invoke_stackobject_arguments_with_run_cctor(
-		InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData());
-
-	if (InvokeResult.is_err())
+	if (!InvokeRaw(InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData(), "LeanCLR: reverse invoke failed"))
 	{
-		if (vm::RtException* Exception = vm::Exception::get_and_clear_current_exception())
-		{
-			LogManagedException(Exception);
-		}
-		else
-		{
-			FLeanCLRLog::ErrorWriter("LeanCLR: reverse invoke failed");
-		}
-
 		return InvalidManagedHandle;
 	}
 
