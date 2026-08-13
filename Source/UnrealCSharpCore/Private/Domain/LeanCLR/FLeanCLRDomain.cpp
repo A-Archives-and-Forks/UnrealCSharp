@@ -37,16 +37,14 @@ THIRD_PARTY_INCLUDES_START
 #include "core/rt_result.h"
 THIRD_PARTY_INCLUDES_END
 
-// P4: runtime lifecycle (Initialize / assembly loading / bridge-handle resolution / native-diagnostics
+// Runtime lifecycle (Initialize / assembly loading / bridge-handle resolution / native-diagnostics
 // logging / Tick / Deinitialize). This is the FORWARD half of strategy A (native -> managed bridge via
-// vm::Runtime::invoke, the path the P0/P1 spike round-tripped 20/20). The REVERSE half (C# -> UE native
-// bindings) is wired via RegisterPInvokes: the LeanCLR-target generator emits [DllImport] stubs, and each
-// UE binding is registered as a named P/Invoke bound to LeanCLRNativeInvoker (pure-C++ arity dispatch, no
-// asm — args and returns are single-slot GP integer/pointer; no floats exist across the binding surface).
-// SCOPE: this round covers the GENERATED bindings (Script/{UE,Game}/Proxy/Binding). The 28 hand-written
-// core-library files (Script/UE/Library/*Implementation.cs) still use calli and are converted in a later
-// round; the invoker already handles their non-void (nint/int/byte) returns. The per-method IScriptDomain
-// bodies (P5) remain graceful stubs, so FReflectionRegistry stays empty until P5.1 lands.
+// vm::Runtime::invoke). The REVERSE half (C# -> UE native bindings) is wired via RegisterPInvokes: the
+// LeanCLR-target generator emits [DllImport] stubs, and each UE binding is registered as a named
+// P/Invoke bound to LeanCLRNativeInvoker (pure-C++ arity dispatch, no asm — args and returns are
+// single-slot GP integer/pointer; no floats exist across the binding surface). The hand-written core
+// library (Script/UE/Library/*Implementation.cs) reaches the same invoker through the "__"-prefixed
+// aliases registered alongside each canonical name.
 
 namespace
 {
@@ -114,8 +112,9 @@ namespace
 		return false;
 	}
 
-	// leanclr -> UE Output Log (P4.2). Native diagnostics only; the managed LogBridge.SetLog callback is
-	// a C# -> native reverse call and belongs with the reverse channel (deferred).
+	// leanclr -> UE Output Log. Native diagnostics only: the managed LogBridge.SetLog callback hands a
+	// native function pointer across the boundary, which leanclr cannot call (R5), so C# Console output
+	// takes the LogLeanCLR named P/Invoke instead (see RegisterPInvokes).
 	void LeanCLRReportUnhandledException(leanclr::vm::RtException* InException)
 	{
 		if (InException == nullptr)
@@ -1175,9 +1174,6 @@ void FLeanCLRDomain::InitializeAssembly(const TArray<FString>& InAssemblies)
 		RegisterSynchronizationContextTick();
 
 		FReflectionRegistry::Get().Initialize();
-
-		// RegisterBinding() is deliberately NOT called: it is the reverse channel (C# -> UE native
-		// bindings) and depends on the P1.1 generator change + the P/Invoke invoker. Deferred pass.
 	}
 	else
 	{
@@ -1383,7 +1379,6 @@ void FLeanCLRDomain::ResolveBridgeMethods()
 	RESOLVE_INTEROP_BRIDGE(FieldBridgeSetStaticValue, CLASS_FIELD_BRIDGE, FUNCTION_FIELD_BRIDGE_SET_STATIC_VALUE)
 	RESOLVE_INTEROP_BRIDGE(FieldBridgeGetStaticValue, CLASS_FIELD_BRIDGE, FUNCTION_FIELD_BRIDGE_GET_STATIC_VALUE)
 
-	RESOLVE_INTEROP_BRIDGE(MethodBridgeRegisterBinding, CLASS_METHOD_BRIDGE, FUNCTION_METHOD_BRIDGE_REGISTER_BINDING)
 	RESOLVE_INTEROP_BRIDGE(MethodBridgeInvoke, CLASS_METHOD_BRIDGE, FUNCTION_METHOD_BRIDGE_INVOKE)
 
 	RESOLVE_INTEROP_BRIDGE(StringBridgeNewString, CLASS_STRING_BRIDGE, FUNCTION_STRING_BRIDGE_NEW_STRING)
@@ -1411,14 +1406,6 @@ void FLeanCLRDomain::RegisterLog()
 	leanclr::vm::Settings::set_report_unhandled_exception_function(&LeanCLRReportUnhandledException);
 
 	leanclr::vm::Settings::set_debugger_log_function(&LeanCLRDebuggerLog);
-}
-
-void FLeanCLRDomain::RegisterBinding() const
-{
-	// LeanCLR reverse channel goes through named P/Invokes (see RegisterPInvokes), not the C#
-	// StringToMethod dictionary: the LeanCLR-target generator emits [DllImport] stubs that never call
-	// MethodBridge.GetMethod, so populating that dictionary via Bridge.MethodBridgeRegisterBinding is
-	// unnecessary here. Kept as an intentional no-op; the cached handle stays resolved but unused.
 }
 
 void FLeanCLRDomain::RegisterSynchronizationContextTick()

@@ -27,10 +27,6 @@ struct RtAssembly;
 // Interop bridge method to an RtMethodInfo* and calls it via vm::Runtime::invoke_stackobject_*.
 // FLeanCLRMarshal owns the RtStackObject packing/unpacking and the resolve+invoke primitives — the
 // exact logic proven green in the P1 spike (Intermediate/LeanCLRSpike/spike.cpp resolve()/invoke()).
-//
-// P3.3 scope: the primitives + scalar/handle conversions. The live int/string/handle round-trip is
-// exercised once the runtime is stood up (P4.1 Initialize + P5 method bodies); the packing here is
-// the same code path the spike round-tripped 20/20.
 class FLeanCLRMarshal
 {
 public:

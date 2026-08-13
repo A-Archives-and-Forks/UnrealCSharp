@@ -9,7 +9,7 @@
 // FLeanCLRDomain.cpp itself must stay platform-branch-free. leanclr is fed assemblies through a
 // file loader (Settings::set_file_loader) rather than loading from a fixed layout, so these helpers
 // just enumerate the directories that loader searches: the UnrealCSharp publish output (Interop / UE
-// / Game) and the corlib (.NET 10 BCL IL) staged next to the binary by LeanCLR.Build.cs::CopyCorlib.
+// / Game) and the corlib (.NET 10 BCL IL) staged next to the binary by LeanCLR.Build.cs::StageCorlib.
 class UNREALCSHARPCORE_API FLeanCLRFunctionLibrary
 {
 public:
@@ -18,7 +18,6 @@ public:
 
 	// Directory holding the corlib (System.Private.CoreLib + BCL IL) that leanclr loads at startup.
 	// Mirrors LeanCLR.Build.cs staging: <BinaryOutputDir>/LeanCLR/<Platform>/net.
-	// TODO(R3/P4): reconcile with the runtime file-loader search set once Initialize() lands (P4.1).
 	static FString GetCorlibDirectory();
 
 	// Ordered directories the leanclr file loader should search (corlib first, then publish).

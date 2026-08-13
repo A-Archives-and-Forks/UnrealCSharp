@@ -24,15 +24,18 @@ class RtModuleDef;
 // pointers, strategy A caches RtMethodInfo* and calls them through vm::Runtime::invoke (an IL
 // interpreter cannot hand out callable native pointers). Populated by ResolveBridgeMethods (P4).
 //
-// Deliberately narrower than SCRIPT_TYPES: four of its entries cannot be reached from this backend
+// Deliberately narrower than SCRIPT_TYPES: five of its entries cannot be reached from this backend
 // and are therefore absent, so that ResolveBridgeMethods' resolved N/N health log only counts
 // handles that are actually callable.
 //   - LogBridge.SetLog / TypeBridge.GetFunctionPointer: both hand a native function pointer across
 //     the boundary, which leanclr cannot do (R5: no unmanaged calli).
 //   - LogBridge.Initialize: superseded by InitializeLeanCLR + the LogLeanCLR P/Invoke registered in
-//     RegisterBindingPInvokes.
-//   - AssemblyLoader.LoadFromStream: assemblies are loaded by FLeanCLRFileLoader +
+//     RegisterPInvokes.
+//   - AssemblyLoader.LoadFromStream: assemblies are loaded by LeanCLRFileLoader +
 //     Assembly::load_by_name, never from a managed stream.
+//   - MethodBridge.RegisterBinding: it populates the C# StringToMethod dictionary that Mono/CoreCLR
+//     bindings look themselves up in. LeanCLR bindings are named P/Invokes resolved by leanclr's own
+//     table (RegisterPInvokes), so nothing ever reads that dictionary here.
 struct FLeanCLRBridge
 {
 #define LEANCLR_BRIDGE_METHOD(Name) const leanclr::metadata::RtMethodInfo* Name{};
@@ -85,7 +88,6 @@ struct FLeanCLRBridge
 	LEANCLR_BRIDGE_METHOD(FieldBridgeSetStaticValue)
 	LEANCLR_BRIDGE_METHOD(FieldBridgeGetStaticValue)
 
-	LEANCLR_BRIDGE_METHOD(MethodBridgeRegisterBinding)
 	LEANCLR_BRIDGE_METHOD(MethodBridgeInvoke)
 
 	LEANCLR_BRIDGE_METHOD(StringBridgeNewString)
@@ -109,9 +111,6 @@ struct FLeanCLRBridge
 // Unlike Mono/CoreCLR this does NOT reuse FScriptDomainImpl.inl — that .inl dispatches through
 // native function pointers, which leanclr cannot provide. Each IScriptDomain method is implemented
 // in the .cpp by invoking the corresponding cached bridge method via FLeanCLRMarshal (strategy A).
-//
-// P3 status: skeleton. Lifecycle (P4) and the per-method invoke bodies (P5) are graceful stubs that
-// return empty/invalid so a LeanCLR launch constructs and initializes without crashing.
 class UNREALCSHARPCORE_API FLeanCLRDomain final : public IScriptDomain
 {
 public:
@@ -191,7 +190,7 @@ public:
 	                                                          const IManagedHandle InManagedHandle) override;
 
 private:
-	// Lifecycle sub-steps (P4). Declared now to fix the class shape; skeleton bodies live in the .cpp.
+	// Lifecycle sub-steps, called in this order from Initialize()/Deinitialize().
 	void InitializeAssembly(const TArray<FString>& InAssemblies);
 
 	void LoadAssembly(const TArray<FString>& InAssemblies);
@@ -203,8 +202,6 @@ private:
 	void ResolveBridgeMethods();
 
 	void RegisterLog();
-
-	void RegisterBinding() const;
 
 	void RegisterSynchronizationContextTick();
 
