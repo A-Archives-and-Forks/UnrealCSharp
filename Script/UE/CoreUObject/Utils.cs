@@ -344,13 +344,26 @@ namespace Script.CoreUObject
                         // false and every woven UProperty marker is lost.
                         if (Field != null && Field.Name.StartsWith("__", StringComparison.Ordinal))
                         {
+                            // Both collections are keyed by the PROPERTY name: the "__" prefix and the
+                            // "_Attrs" suffix the weaver adds are stripped once, here. The per-property
+                            // lookups below then index with the property name as-is instead of rebuilding
+                            // "__" + Name (+ "_Attrs") on every property, and the knowledge of how the
+                            // weaver decorates these names stays in this one spot (same principle P8.15
+                            // applied to the backing-field name).
                             if (Field.Name.EndsWith("_Attrs", StringComparison.Ordinal))
                             {
-                                LeanCLRWovenAttrFields[Field.Name] = Field;
+                                // "__" + <Property> + "_Attrs" is 8 characters of affix. A name with
+                                // nothing in between could never match a property under the previous
+                                // raw-name lookup either, so it stays unindexed rather than colliding
+                                // with a property that happens to be called "Attrs".
+                                if (Field.Name.Length > 8)
+                                {
+                                    LeanCLRWovenAttrFields[Field.Name.Substring(2, Field.Name.Length - 8)] = Field;
+                                }
                             }
                             else
                             {
-                                LeanCLRWovenFieldNames.Add(Field.Name);
+                                LeanCLRWovenFieldNames.Add(Field.Name.Substring(2));
                             }
                         }
                     }
@@ -370,7 +383,7 @@ namespace Script.CoreUObject
                     var PropertyAttributeCount = 0;
 
 #if LEANCLR
-                    if (LeanCLRWovenFieldNames.Contains("__" + OutPropertyInfos[i].Name))
+                    if (LeanCLRWovenFieldNames.Contains(OutPropertyInfos[i].Name))
                     {
                         PropertyAttributes.Add(typeof(UPropertyAttribute));
 
@@ -380,8 +393,7 @@ namespace Script.CoreUObject
                     }
 
                     // Recover companion attributes from __<Name>_Attrs woven static string fields.
-                    if (LeanCLRWovenAttrFields.TryGetValue(
-                            "__" + OutPropertyInfos[i].Name + "_Attrs", out var AttrField))
+                    if (LeanCLRWovenAttrFields.TryGetValue(OutPropertyInfos[i].Name, out var AttrField))
                     {
                         string AttrData = null;
 
@@ -428,11 +440,17 @@ namespace Script.CoreUObject
 
                                 var TypeFullName = LeanCLRDecodeAttributeField(Parts[0]);
 
-                                // Type.GetType misses every time on leanclr (measured in-editor:
-                                // getType=0, dictionary=75), so the dictionary is the real lookup
-                                // path here rather than a rare fallback.
-                                var AttrType = Type.GetType(TypeFullName) ??
-                                               LeanCLRFindUETypeByFullName(TypeFullName);
+                                // Dictionary first, Type.GetType only as a fallback. Both resolve
+                                // against the SAME assembly (typeof(UClassAttribute) and this file ship
+                                // in UE.dll, and Type.GetType searches the calling assembly), so where
+                                // both hit they hit the same type -- and measurement says only one ever
+                                // hits: over a full session every payload name resolves from the
+                                // dictionary and Type.GetType hits 0 times (P8.6 measured 75/0; P9.3
+                                // re-measured with an equivalence probe: dictHit == total at every
+                                // checkpoint, getTypeHit == 0, so "both hit but differ" is unreachable).
+                                // Asking the runtime first therefore only bought a futile lookup per line.
+                                var AttrType = LeanCLRFindUETypeByFullName(TypeFullName) ??
+                                               Type.GetType(TypeFullName);
 
                                 if (AttrType == null)
                                 {
