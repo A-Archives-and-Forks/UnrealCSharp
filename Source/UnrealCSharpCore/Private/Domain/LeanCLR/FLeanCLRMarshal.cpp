@@ -115,15 +115,19 @@ bool FLeanCLRMarshal::Invoke(const metadata::RtMethodInfo* InMethod,
 	}
 
 	// Return buffer sized from the method's declared return stack-object size (at least one slot).
+	// TInlineAllocator: every bridge method measured needs at most 4 arg slots and 1 return slot
+	// (P9.5: 200k invokes per test session, max 4/1, zero over 8), so the inline storage covers the
+	// whole bridge surface and the two heap allocations this path used to pay disappear. Overflow
+	// falls back to FDefaultAllocator — the allocator used here before — so behaviour is unchanged.
 	const size_t ReturnSlots = vm::Method::get_return_value_stack_object_size(InMethod);
 
-	TArray<FStackObject> ReturnBuffer;
+	TArray<FStackObject, TInlineAllocator<8>> ReturnBuffer;
 	ReturnBuffer.SetNumZeroed(ReturnSlots == 0 ? 1 : static_cast<int32>(ReturnSlots));
 
 	// Argument buffer must be at least the method's declared total arg size; copy caller slots in.
 	const size_t ArgSlots = vm::Method::get_total_arg_stack_object_size(InMethod);
 
-	TArray<FStackObject> ArgBuffer;
+	TArray<FStackObject, TInlineAllocator<8>> ArgBuffer;
 	ArgBuffer.SetNumZeroed(ArgSlots == 0 ? 1 : static_cast<int32>(ArgSlots));
 
 	if (InArgs != nullptr)
@@ -380,7 +384,9 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 
 	const size_t ArgSlots = vm::Method::get_total_arg_stack_object_size(InMethod);
 
-	TArray<FStackObject> ArgBuffer;
+	// Inline storage as in Invoke above. Unlike the bridge surface, the slot count here comes from a
+	// user-written C# method, so >8 slots is possible; that case simply falls back to the heap.
+	TArray<FStackObject, TInlineAllocator<8>> ArgBuffer;
 	ArgBuffer.SetNumZeroed(ArgSlots == 0 ? 1 : static_cast<int32>(ArgSlots));
 
 	size_t SlotIndex = 0;
@@ -455,7 +461,7 @@ IManagedHandle FLeanCLRMarshal::InvokeReverse(const metadata::RtMethodInfo* InGe
 
 	const size_t ReturnSlots = vm::Method::get_return_value_stack_object_size(InMethod);
 
-	TArray<FStackObject> ReturnBuffer;
+	TArray<FStackObject, TInlineAllocator<8>> ReturnBuffer;
 	ReturnBuffer.SetNumZeroed(ReturnSlots == 0 ? 1 : static_cast<int32>(ReturnSlots));
 
 	if (!InvokeRaw(InMethod, ArgBuffer.GetData(), ReturnBuffer.GetData(), "LeanCLR: reverse invoke failed"))
