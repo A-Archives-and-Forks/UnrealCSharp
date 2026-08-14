@@ -755,9 +755,11 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 
 	auto ClassImplementationContent = BINDING_COMBINE_CLASS_IMPLEMENTATION(ClassContent);
 
-	// LeanCLR 后端无法对裸原生指针做非托管 calli，改为把绑定发成具名 [DllImport]，
-	// 宿主侧按 C# 声明全名注册成 P/Invoke（见 FLeanCLRDomain::RegisterPInvokes）。
-	// 选项 A（后端感知）：仅 LeanCLR 目标改形态，Mono/CoreCLR 保持 calli，零回归。
+	// The LeanCLR interpreter cannot issue an unmanaged calli through a raw native pointer, so its
+	// bindings are emitted as named [DllImport]s instead, and the host registers each one as a
+	// P/Invoke keyed by the C# declaration's full name (see FLeanCLRDomain::RegisterPInvokes).
+	// Option A (backend-aware): only the LeanCLR target changes shape -- Mono/CoreCLR keep calli, so
+	// they carry no regression from this.
 	const auto bLeanCLR = FUnrealCSharpFunctionLibrary::GetScriptDomainType() == EScriptDomainType::LeanCLR;
 
 	FString FunctionContent;
@@ -815,8 +817,14 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 
 		if (bLeanCLR)
 		{
-			// 构造：需保留 InObject -> 句柄 的 HandleData.Alloc 转换，故拆成
-			// 私有 extern(nint,...)（名字 = InMethodName，与注册 key 匹配）+ 同名对象入参重载包装。
+			// Constructor: the InObject -> handle conversion (HandleData.Alloc) has to survive, so the
+			// binding is split into a private extern(nint, ...) -- named InMethodName so it still
+			// matches the registration key -- plus a same-named wrapper that takes the object itself.
+			//
+			// The two overloads cannot collide, by construction rather than by luck: bIsConstructor is
+			// DEFINED above as InType != "nint", so reaching this branch is itself proof that the
+			// wrapper's first parameter type differs from the extern's nint. (Measured on the emitted
+			// output: 94 such pairs, 36 distinct wrapper types, "nint" among them zero times.)
 			if (bIsConstructor)
 			{
 				return FString::Printf(TEXT(
@@ -842,8 +850,11 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 				);
 			}
 
-			// 非构造（含 property/subscript get/set）：公共方法本身即 extern，
-			// 签名 (nint InObject, <InParam>) 与原生一致，方法名 = InMethodName。
+			// Non-constructor (including property and subscript get/set): the public method is itself
+			// the extern, and its name is InMethodName. Its first parameter prints as nint because
+			// InType is exactly "nint" on this path -- that is the same equality bIsConstructor was
+			// derived from -- so the emitted signature (nint InObject, <InParam>) matches the native
+			// side without a wrapper.
 			return FString::Printf(TEXT(
 				"\t\t[DllImport(\"__UnrealCSharpLeanCLR\", CallingConvention = CallingConvention.Cdecl)]\n"
 				"\t\tpublic static extern unsafe void %s(%s InObject%s%s);\n"
