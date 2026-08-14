@@ -247,6 +247,27 @@ namespace Weavers
         }
 
         /// <summary>
+        /// The namespace of the outermost type enclosing InType, which is the only place Cecil records
+        /// one: for a nested TypeReference both Namespace and -- once nesting goes deeper than a single
+        /// level -- DeclaringType.Namespace come back empty. Testing attrType.Namespace directly would
+        /// therefore silently drop every nested companion attribute, while the reflection path that the
+        /// Mono/CoreCLR branch of Utils.cs uses reports the enclosing namespace for the very same type
+        /// and keeps it -- i.e. the same attribute would work on two backends and vanish on the third.
+        /// For a top-level type this returns exactly InType.Namespace, so no existing payload changes.
+        /// </summary>
+        private static string GetRootNamespace(TypeReference InType)
+        {
+            var root = InType;
+
+            while (root.DeclaringType != null)
+            {
+                root = root.DeclaringType;
+            }
+
+            return root.Namespace;
+        }
+
+        /// <summary>
         /// For each [UProperty], emit a __&lt;Name&gt;_Attrs static readonly string field that encodes
         /// all companion attributes (Script.Dynamic namespace, excluding UPropertyAttribute itself)
         /// so that the LeanCLR Utils.cs path can recover them when PropertyInfo.CustomAttributes is broken.
@@ -270,7 +291,7 @@ namespace Weavers
                 // Only Script.Dynamic namespace, excluding UPropertyAttribute (already handled via __&lt;Name&gt;)
                 var attrType = attr.AttributeType;
 
-                if (attrType.Namespace != "Script.Dynamic" ||
+                if (GetRootNamespace(attrType) != "Script.Dynamic" ||
                     attrType.Name == "UPropertyAttribute")
                 {
                     continue;
@@ -308,7 +329,12 @@ namespace Weavers
                     }
                 }
 
-                var line = EncodeAttributeField(attrType.FullName) + "|" +
+                // Cecil separates nested types with '/', while the read side keys on reflection's
+                // Type.FullName, which uses '+' (Utils.cs LeanCLRFindUETypeByFullName builds its
+                // dictionary from Assembly.GetTypes() and falls back to Type.GetType -- both '+').
+                // Converting here makes a nested companion attribute resolve; a top-level name has no
+                // '/' at all, so this is a no-op for every attribute that exists today.
+                var line = EncodeAttributeField(attrType.FullName.Replace('/', '+')) + "|" +
                            values.Count.ToString(CultureInfo.InvariantCulture);
 
                 foreach (var value in values)
