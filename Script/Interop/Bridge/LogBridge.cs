@@ -26,10 +26,22 @@ public sealed class LogBridge : TextWriter
     // full name "Interop.LogBridge::LogLeanCLR" — the [DllImport] module name is ignored by leanclr).
     // LeanCLR cannot perform an unmanaged calli on a raw function pointer, so unlike the Mono/CoreCLR
     // path (SetLog + delegate* calli) the host registers FScriptLog::Log as a named P/Invoke and Flush
-    // falls through to this extern whenever LogFn was never set. The DllImport is only ever CALLED in
-    // that case, so Mono/CoreCLR never try to load the fake module (zero regression).
+    // falls through to this extern on that backend. The DllImport is only ever CALLED there, so
+    // Mono/CoreCLR never try to load the fake module (zero regression).
     [DllImport("__UnrealCSharpLeanCLR", CallingConvention = CallingConvention.Cdecl)]
     private static unsafe extern void LogLeanCLR(byte* InBuffer, int InSize, byte InIsError);
+
+    // Which of the two sinks Flush is allowed to use. Set once from InitializeLeanCLR — the leanclr-only
+    // entry point — and deliberately never cleared, because "this process runs on leanclr" is a
+    // structural fact for the lifetime of the process. Flush must NOT key off LogFn == null instead:
+    // that null is merely temporal and occurs on every backend, both before SetLog and after
+    // Deinitialize. The host resolves SetLog and Initialize through two independent lookups
+    // (FScriptDomainImpl.inl RegisterLog) whose macros leave the pointer null and report nothing on
+    // failure (GET_METHOD_AND_GET_FUNCTION_POINTER / LOAD_ASSEMBLY_AND_GET_FUNCTION_POINTER), so a
+    // SetLog miss with Initialize still succeeding would have turned the first Console.WriteLine on
+    // Mono/CoreCLR into a DllNotFoundException for a module that does not exist there. Keying off the
+    // backend keeps the original behaviour in that case: no sink means the line is dropped.
+    private static bool bUseNamedPInvoke;
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe void SetLog(nint InLogFn)
@@ -56,6 +68,10 @@ public sealed class LogBridge : TextWriter
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static void InitializeLeanCLR()
     {
+        // Before the first SetOut: the writers created below are the earliest LogBridge instances that
+        // can exist (the constructor is private), so none of them can ever observe this as false.
+        bUseNamedPInvoke = true;
+
         Console.SetOut(new LogBridge(InIsError: false));
 
         Console.SetError(new LogBridge(InIsError: true));
@@ -168,7 +184,7 @@ public sealed class LogBridge : TextWriter
                 // Mono/CoreCLR: unmanaged function pointer handed over via SetLog.
                 LogFn(Ptr, Size, (byte)(InIsError ? 1 : 0));
             }
-            else
+            else if (bUseNamedPInvoke)
             {
                 // LeanCLR: named P/Invoke (see LogLeanCLR's comment); SetLog is never called there.
                 LogLeanCLR(Ptr, Size, (byte)(InIsError ? 1 : 0));

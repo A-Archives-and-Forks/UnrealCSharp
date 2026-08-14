@@ -105,6 +105,10 @@ namespace Interop
             return RegisterStaticSingleton(InType, "StaticStructSingleton", InValue);
         }
 
+        // One-shot latch for the diagnostic below, so a name mismatch reports once instead of once per
+        // proxy type (13337 of them in this project).
+        private static bool bReportedStaticSingletonMiss;
+
         private static object? RegisterStaticSingleton(Type? InType, string InName, object? InValue)
         {
             // A null value means nothing got cached, so there is nothing to reset later.
@@ -121,6 +125,27 @@ namespace Interop
                 if (Property != null && Property.CanWrite)
                 {
                     RegisteredStaticSingletons[InType] = Property;
+                }
+                else if (!bReportedStaticSingletonMiss)
+                {
+                    // This name is spelled out in four unrelated places -- PROPERTY_STATIC_CLASS_SINGLETON /
+                    // PROPERTY_STATIC_STRUCT_SINGLETON in PropertyMacro.h (used by FClassDescriptor's
+                    // per-type reset), the literals above, and the text emitted by FClass/FStructGenerator
+                    // and by UnrealTypeSourceGenerator -- with nothing checking that the four agree. Both
+                    // reset paths fail silently when they drift: the native one writes nothing, and this
+                    // one used to just skip the type, leaving its cached wrapper alive across teardown so
+                    // the next PIE session cannot spawn. P8.15 was one instance of exactly that bug (native
+                    // asked for a field while the generators emit an auto-property, so all three backends
+                    // no-opped over 13337 properties). Reporting the first miss turns the next drift into a
+                    // line in the log instead of a spawn failure to be traced back from scratch.
+                    bReportedStaticSingletonMiss = true;
+
+                    Console.Error.WriteLine(
+                        $"AssemblyLoader: '{InName}' is not a writable non-public static property on " +
+                        $"{InType.FullName} (found: {(Property == null ? "nothing" : "a read-only property")}). " +
+                        "Its cached wrapper will survive teardown. Check that PropertyMacro.h, " +
+                        "AssemblyLoader, FClass/FStructGenerator and UnrealTypeSourceGenerator still " +
+                        "spell this name the same way.");
                 }
             }
             catch
