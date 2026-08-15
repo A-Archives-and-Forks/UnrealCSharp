@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -53,6 +54,19 @@ namespace SourceGenerator
         public void Execute(GeneratorExecutionContext Context)
         {
             if (!(Context.SyntaxReceiver is UnrealTypeReceiver unrealTypeReceiver))
+            {
+                return;
+            }
+
+            // Everything below emits `using Script.UnrealCSharpCore;` unconditionally, and that namespace
+            // only exists in the Game assembly's own proxies -- so in any other compilation this
+            // generator can only produce code that does not compile. That used to be moot because the
+            // generator was referenced from Game.props alone; it stopped being moot when UE.csproj
+            // started referencing the same analyzer assembly for LibraryBridgeGenerator, at which point
+            // this generator began firing on UE's thousands of `partial class X : IStaticStruct` proxies
+            // and emitting files that fail with CS0234. Bail out instead: if the types the output is
+            // written against are absent, there is nothing valid to emit.
+            if (HasUnrealCSharpCoreNamespace(Context.Compilation) == false)
             {
                 return;
             }
@@ -230,6 +244,18 @@ namespace SourceGenerator
         public void Initialize(GeneratorInitializationContext Context)
         {
             Context.RegisterForSyntaxNotifications(() => new UnrealTypeReceiver());
+        }
+
+        // True when the compilation contains the Script.UnrealCSharpCore namespace, i.e. when it is the
+        // assembly this generator's output is written for. Checked as a namespace rather than a specific
+        // type so it does not break the day one of those proxy types gets renamed.
+        private static bool HasUnrealCSharpCoreNamespace(Compilation InCompilation)
+        {
+            var script = InCompilation.GlobalNamespace.GetNamespaceMembers()
+                .FirstOrDefault(Namespace => Namespace.Name == "Script");
+
+            return script != null &&
+                   script.GetNamespaceMembers().Any(Namespace => Namespace.Name == "UnrealCSharpCore");
         }
     }
 
@@ -839,6 +865,173 @@ namespace SourceGenerator
             }
 
             return baseNamespaceDeclarationSyntax.GetFullNamespace() + "." + Syntax.Name;
+        }
+    }
+
+    /// <summary>
+    /// Emits the implementing half of the hand-written core library's native bridges
+    /// (Script/UE/Library/*Implementation.cs).
+    ///
+    /// Those bridges cannot share one call form across backends: LeanCLR's interpreter cannot issue an
+    /// unmanaged calli through a raw native pointer, so on LeanCLR the bridge has to be a named
+    /// [DllImport], while Mono/CoreCLR call a pointer resolved on first use. What CAN be shared is the
+    /// signature: each bridge is now declared once as
+    ///
+    ///     private static unsafe partial void __FName_RegisterImplementation(nint A0, byte* A1);
+    ///
+    /// and this generator writes both implementations behind the same LEANCLR switch the rest of the
+    /// code uses. That removed 209 hand-maintained `#if LEANCLR`/`#else` blocks whose 3 copies of every
+    /// signature (extern declaration, function pointer type, cast) could drift apart -- and only the
+    /// LEANCLR copy is checked by the compiler, the other two would fail at runtime as a corrupted
+    /// stack. Same reasoning as the generated bindings in FBindingClassGenerator.
+    ///
+    /// The resolve key is DERIVED as "&lt;namespace&gt;.&lt;class&gt;::&lt;method name without the __ prefix&gt;",
+    /// which was verified to reproduce all 209 hand-written keys exactly, so no attribute is needed on
+    /// the declaration -- one line per bridge and nothing else.
+    /// </summary>
+    [Generator]
+    public class LibraryBridgeGenerator : ISourceGenerator
+    {
+        private const string BridgeNamespace = "Script.Library";
+
+        private const string NativeModuleName = "__UnrealCSharpLeanCLR";
+
+        public void Initialize(GeneratorInitializationContext Context)
+        {
+            Context.RegisterForSyntaxNotifications(() => new LibraryBridgeReceiver());
+        }
+
+        public void Execute(GeneratorExecutionContext Context)
+        {
+            if (Context.SyntaxReceiver is LibraryBridgeReceiver receiver == false || receiver.Candidates.Count == 0)
+            {
+                return;
+            }
+
+            // Grouped by owning type so one partial class declaration covers all of its bridges.
+            var byType = new Dictionary<INamedTypeSymbol, List<IMethodSymbol>>(SymbolEqualityComparer.Default);
+
+            foreach (var candidate in receiver.Candidates)
+            {
+                if (Context.Compilation.GetSemanticModel(candidate.SyntaxTree)
+                        .GetDeclaredSymbol(candidate) is IMethodSymbol method == false)
+                {
+                    continue;
+                }
+
+                var owner = method.ContainingType;
+
+                if (owner == null || owner.ContainingNamespace?.ToDisplayString() != BridgeNamespace)
+                {
+                    continue;
+                }
+
+                if (byType.TryGetValue(owner, out var methods) == false)
+                {
+                    methods = new List<IMethodSymbol>();
+
+                    byType[owner] = methods;
+                }
+
+                methods.Add(method);
+            }
+
+            foreach (var pair in byType)
+            {
+                Context.AddSource($"{pair.Key.Name}.LibraryBridge.g.cs", EmitBridges(pair.Key, pair.Value));
+            }
+        }
+
+        private static string EmitBridges(INamedTypeSymbol InOwner, List<IMethodSymbol> InMethods)
+        {
+            var builder = new StringBuilder();
+
+            builder.AppendLine("// <auto-generated/> LibraryBridgeGenerator -- do not edit.");
+            builder.AppendLine("#if LEANCLR");
+            builder.AppendLine("using System.Runtime.InteropServices;");
+            builder.AppendLine("#endif");
+            builder.AppendLine();
+            builder.AppendLine($"namespace {BridgeNamespace}");
+            builder.AppendLine("{");
+            builder.AppendLine(
+                $"    {(InOwner.DeclaredAccessibility == Accessibility.Public ? "public" : "internal")} static unsafe partial class {InOwner.Name}");
+            builder.AppendLine("    {");
+
+            foreach (var method in InMethods.OrderBy(Method => Method.Name, StringComparer.Ordinal))
+            {
+                var returnType = method.ReturnsVoid ? "void" : Qualify(method.ReturnType);
+
+                var parameters = string.Join(", ", method.Parameters.Select(
+                    Parameter => $"{Qualify(Parameter.Type)} {Parameter.Name}"));
+
+                var arguments = string.Join(", ", method.Parameters.Select(Parameter => Parameter.Name));
+
+                var pointerType = string.Join(", ", method.Parameters
+                    .Select(Parameter => Qualify(Parameter.Type)).Concat(new[] { returnType }));
+
+                var key = $"{BridgeNamespace}.{InOwner.Name}::{method.Name.Substring(2)}";
+
+                builder.AppendLine("#if LEANCLR");
+                builder.AppendLine(
+                    $"        [DllImport(\"{NativeModuleName}\", CallingConvention = CallingConvention.Cdecl)]");
+                builder.AppendLine(
+                    $"        private static extern unsafe partial {returnType} {method.Name}({parameters});");
+                builder.AppendLine("#else");
+                builder.AppendLine($"        private static nint {method.Name}_Slot;");
+                builder.AppendLine();
+                builder.AppendLine($"        private static unsafe partial {returnType} {method.Name}({parameters}) =>");
+                builder.AppendLine(
+                    $"            ((delegate* unmanaged[Cdecl]<{pointerType}>)global::Interop.MethodBridge.Resolve(");
+                builder.AppendLine($"                ref {method.Name}_Slot, \"{key}\"))({arguments});");
+                builder.AppendLine("#endif");
+                builder.AppendLine();
+            }
+
+            builder.AppendLine("    }");
+            builder.AppendLine("}");
+
+            return builder.ToString();
+        }
+
+        // Fully qualified so the generated file needs no using directives of its own: parameter types
+        // include enums declared elsewhere (ELoadFlags, EObjectFlags) that would not otherwise resolve.
+        private static string Qualify(ITypeSymbol InType)
+        {
+            return InType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        }
+    }
+
+    public class LibraryBridgeReceiver : ISyntaxReceiver
+    {
+        public readonly List<MethodDeclarationSyntax> Candidates = new List<MethodDeclarationSyntax>();
+
+        public void OnVisitSyntaxNode(SyntaxNode Node)
+        {
+            if (Node is MethodDeclarationSyntax methodDeclarationSyntax == false)
+            {
+                return;
+            }
+
+            // A bridge declaration is: partial, static, bodyless, and named with the "__" prefix that
+            // FLeanCLRDomain::RegisterPInvokes registers an alias for.
+            if (methodDeclarationSyntax.Body != null || methodDeclarationSyntax.ExpressionBody != null)
+            {
+                return;
+            }
+
+            if (methodDeclarationSyntax.Identifier.ValueText.StartsWith("__", StringComparison.Ordinal) == false)
+            {
+                return;
+            }
+
+            var modifiers = methodDeclarationSyntax.Modifiers.Select(Modifier => Modifier.ValueText).ToList();
+
+            if (modifiers.Contains("partial") == false || modifiers.Contains("static") == false)
+            {
+                return;
+            }
+
+            Candidates.Add(methodDeclarationSyntax);
         }
     }
 }

@@ -3,4 +3,11 @@
   <ItemGroup>
     <Compile Include="..\..\Plugins\UnrealCSharp\Script\UE\**" Exclude="..\..\Plugins\UnrealCSharp\Script\UE\**\*.DS_Store"></Compile>
   </ItemGroup>
+  <ItemGroup>
+    <!-- LibraryBridgeGenerator emits the implementing half of Script/UE/Library's native bridges, so
+         this assembly needs the generator the same way Game does (Game.props). The other generator in
+         that project (UnrealTypeSourceGenerator) only fires on [UClass]/[UStruct]/[UEnum], of which
+         this assembly's sources contain none, so it runs and emits nothing here. -->
+    <ProjectReference Include="..\SourceGenerator\SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false"/>
+  </ItemGroup>
 </Project>
