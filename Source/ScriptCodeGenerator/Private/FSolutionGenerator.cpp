@@ -208,11 +208,12 @@ void FSolutionGenerator::ReplaceDefineConstants(FString& OutResult)
 		DefineConstants += TEXT("WITH_EDITOR;");
 	}
 
-	// LeanCLR backend: the hand-written core library (Script/UE/Library/*Implementation.cs) is shared
-	// across all three backends and picks its call form with `#if LEANCLR` — unmanaged calli via
-	// MethodBridge on Mono/CoreCLR, named [DllImport] resolved by the host P/Invoke registry on LeanCLR
-	// (see FLeanCLRDomain::RegisterPInvokes). Emit the define only for the LeanCLR target so Mono/CoreCLR
-	// keep the calli path untouched.
+	// LeanCLR backend: the generated library/binding bridges (LibraryBridgeGenerator) cannot share one
+	// call form across backends — leanclr's interpreter cannot issue an unmanaged calli through a raw
+	// native pointer (R5), so it needs a named [DllImport] resolved by the host P/Invoke registry (see
+	// FLeanCLRDomain::RegisterPInvokes) while Mono/CoreCLR call a pointer resolved on first use. The
+	// generator writes both implementations behind this define, so it is still consumed even though no
+	// hand-written source file has an `#if LEANCLR` left.
 	//
 	// Read the backend from the ambient FScriptDomainTypeScope (the no-arg overload), NOT from the running
 	// platform's ini: code generation targets the platform passed to FUnrealCSharpEditorModule::Generator,

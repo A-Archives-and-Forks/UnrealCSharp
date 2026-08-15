@@ -12,10 +12,15 @@ namespace Script.CoreUObject
 {
     public static class Utils
     {
-#if LEANCLR
-        // Everything in this region is process-wide and immutable once built: the UE assembly is
-        // never unloaded on this backend (there is no collectible ALC, see AssemblyLoader.Unload),
-        // so a type map derived from it cannot go stale.
+        // The three helpers below exist because of two leanclr defects (PropertyInfo.CustomAttributes
+        // is broken, Type.GetMethods does not collapse overridden virtual slots), but they are compiled
+        // and run on all three backends: the woven payload they read is emitted unconditionally by the
+        // weaver, so the same code produces the same output everywhere and the file needs no #if.
+        //
+        // The map is immutable once built and cannot go stale: on leanclr the UE assembly is never
+        // unloaded (there is no collectible ALC, see AssemblyLoader.Unload), and on Mono/CoreCLR this
+        // static lives inside the collectible context together with the types it caches, so it dies
+        // with them instead of pinning a dead assembly.
         private static Dictionary<string, Type> LeanCLRUETypesByFullName;
 
         // Replaces a full UEAssembly.GetTypes().FirstOrDefault(...) scan per unresolved name.
@@ -129,7 +134,6 @@ namespace Script.CoreUObject
 
             return true;
         }
-#endif
 
         public static string GetPathName(Type InType) => InType.GetCustomAttribute<PathNameAttribute>(true)?.PathName;
 
@@ -300,8 +304,6 @@ namespace Script.CoreUObject
         {
             if (InType.IsClass)
             {
-                var UClassAttributeNamespace = typeof(UClassAttribute).Namespace;
-
                 OutPropertyInfos = InType.GetProperties(
                     BindingFlags.Instance |
                     BindingFlags.Static |
@@ -323,7 +325,6 @@ namespace Script.CoreUObject
 
                 var PropertyAttributeValues = new List<string>();
 
-#if LEANCLR
                 var LeanCLRWovenFieldNames = new HashSet<string>();
 
                 var LeanCLRWovenAttrFields = new Dictionary<string, FieldInfo>();
@@ -372,7 +373,6 @@ namespace Script.CoreUObject
                 {
                     // Never let field discovery abort the property parse.
                 }
-#endif
 
                 for (var i = 0; i < OutPropertyInfos.Length; i++)
                 {
@@ -382,7 +382,12 @@ namespace Script.CoreUObject
 
                     var PropertyAttributeCount = 0;
 
-#if LEANCLR
+                    // Companion attributes come from the woven payload on every backend, not from
+                    // PropertyInfo.CustomAttributes: the weaver emits __<Name> / __<Name>_Attrs
+                    // unconditionally, so both routes carry the same set. [UProperty] itself is
+                    // synthesised from the __<Name> marker below (the weaver emits that marker for
+                    // exactly the properties carrying it, and the attribute takes no constructor
+                    // arguments), which is what the reflection route used to report for it.
                     if (LeanCLRWovenFieldNames.Contains(OutPropertyInfos[i].Name))
                     {
                         PropertyAttributes.Add(typeof(UPropertyAttribute));
@@ -471,28 +476,6 @@ namespace Script.CoreUObject
                             }
                         }
                     }
-#else
-                    foreach (var CustomAttribute in OutPropertyInfos[i].CustomAttributes)
-                    {
-                        if (CustomAttribute.AttributeType.Namespace == UClassAttributeNamespace)
-                        {
-                            var PropertyAttributeValueCount = 0;
-
-                            PropertyAttributes.Add(CustomAttribute.AttributeType);
-
-                            foreach (var ConstructorArgument in CustomAttribute.ConstructorArguments)
-                            {
-                                PropertyAttributeValues.Add(ConstructorArgument.Value.ToString());
-
-                                PropertyAttributeValueCount++;
-                            }
-
-                            PropertyAttributeIndex.Add(PropertyAttributeValueCount);
-
-                            PropertyAttributeCount++;
-                        }
-                    }
-#endif
 
                     OutPropertyAttributeCounts[i] = PropertyAttributeCount;
                 }
@@ -554,7 +537,6 @@ namespace Script.CoreUObject
             }
         }
 
-#if LEANCLR
         // leanclr's Type.GetMethods does not collapse overridden virtual slots: an override and the
         // base slot it overrides BOTH appear (runtime probe: 'Test' matches=2 / total=109 on
         // UUnitTestSubsystem, vs CoreCLR's matches=1 / total=105 on the same Game.dll). Forwarding both
@@ -680,7 +662,6 @@ namespace Script.CoreUObject
             // ordinal by contract, so it pairs correctly with the ordinal Equals above.
             public override int GetHashCode() => (Name?.GetHashCode() ?? 0) ^ ParameterCount;
         }
-#endif
 
         private static void GetClassMethodsImplementation(Type InType,
             out int OutMethodLength, out string[] OutMethodNames, out MethodBase[] OutMethodInfos,
@@ -711,12 +692,16 @@ namespace Script.CoreUObject
                     .Where(Method => !Method.IsSpecialName)
                     .ToArray();
 
-#if LEANCLR
                 // leanclr returns the base virtual AND the derived override for the same slot (see
                 // LeanCLRCollapseOverriddenMethods); collapse to the most-derived declaration so the
                 // (name, paramCount)-keyed C++ map keeps the method that actually carries [Override].
+                // Runs on every backend. Where GetMethods reports no duplicate signature the pass is
+                // an identity transform (it appends in input order and only ever replaces in place),
+                // which is the measured case on Mono/CoreCLR -- matches=1 / total=105 against
+                // leanclr's 2 / 109 on the same class. Where a duplicate does reach it (leanclr's
+                // split slots, or a `new`-shadowed member on any backend) the most-derived
+                // declaration wins, which is the entry the C++ map has to end up with anyway.
                 Methods = LeanCLRCollapseOverriddenMethods(Methods);
-#endif
 
                 var ConstructorLength = Constructors.Length;
 
