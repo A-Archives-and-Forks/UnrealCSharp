@@ -869,13 +869,13 @@ namespace SourceGenerator
     }
 
     /// <summary>
-    /// Emits the implementing half of the hand-written core library's native bridges
-    /// (Script/UE/Library/*Implementation.cs).
+    /// Emits the implementing half of the native bridges, for both the hand-written core library
+    /// (Script/UE/Library/*Implementation.cs) and the generated binding proxies (Script/*/Proxy/Binding).
     ///
     /// Those bridges cannot share one call form across backends: LeanCLR's interpreter cannot issue an
     /// unmanaged calli through a raw native pointer, so on LeanCLR the bridge has to be a named
     /// [DllImport], while Mono/CoreCLR call a pointer resolved on first use. What CAN be shared is the
-    /// signature: each bridge is now declared once as
+    /// signature: each bridge is declared once as
     ///
     ///     private static unsafe partial void __FName_RegisterImplementation(nint A0, byte* A1);
     ///
@@ -883,16 +883,30 @@ namespace SourceGenerator
     /// code uses. That removed 209 hand-maintained `#if LEANCLR`/`#else` blocks whose 3 copies of every
     /// signature (extern declaration, function pointer type, cast) could drift apart -- and only the
     /// LEANCLR copy is checked by the compiler, the other two would fail at runtime as a corrupted
-    /// stack. Same reasoning as the generated bindings in FBindingClassGenerator.
+    /// stack. Applying the same shape to the 2090 generated bridges additionally makes the generated
+    /// proxies BACKEND-INDEPENDENT: the binding generator no longer emits different text per backend,
+    /// so switching backends does not require regenerating them.
     ///
-    /// The resolve key is DERIVED as "&lt;namespace&gt;.&lt;class&gt;::&lt;method name without the __ prefix&gt;",
-    /// which was verified to reproduce all 209 hand-written keys exactly, so no attribute is needed on
-    /// the declaration -- one line per bridge and nothing else.
+    /// The resolve key is DERIVED as "&lt;namespace&gt;.&lt;class&gt;::&lt;method name without any __ prefix&gt;".
+    /// For the hand-written library that reproduced all 209 existing keys exactly; for the generated
+    /// bindings it is the key by construction, because FBindingClassGenerator builds the key from the
+    /// very same two strings it uses for the file's namespace and class declaration.
+    ///
+    /// Two namespaces carry native bridges and nothing else does, so the namespace IS the trigger --
+    /// no marker attribute is needed. Measured on the emitted output: of 2090 generated bridges, 2068
+    /// are in Script.Binding and 22 in Script.Library (the generated halves of the 8 classes that are
+    /// ONE partial class split across a generated file and a hand-written one); the other namespaces
+    /// appearing under Proxy/Binding (Script.CoreUObject and three more, 57 files) declare the proxy
+    /// types themselves and contain zero bridges. The hand-written library adds its own declarations to
+    /// Script.Library.
     /// </summary>
     [Generator]
     public class LibraryBridgeGenerator : ISourceGenerator
     {
-        private const string BridgeNamespace = "Script.Library";
+        // A bodyless static partial method in either of these is a native bridge. Both namespaces belong
+        // to the plugin -- user types live under their own module namespaces -- and the failure mode of a
+        // false positive is a link-time miss, not silent misbehaviour.
+        private static readonly string[] BridgeNamespaces = { "Script.Binding", "Script.Library" };
 
         private const string NativeModuleName = "__UnrealCSharpLeanCLR";
 
@@ -908,7 +922,9 @@ namespace SourceGenerator
                 return;
             }
 
-            // Grouped by owning type so one partial class declaration covers all of its bridges.
+            // Grouped by owning type so one partial class declaration covers all of its bridges. A
+            // partial class split across several files is a single symbol, so this also merges the
+            // hand-written and generated halves of the 8 classes that are split that way.
             var byType = new Dictionary<INamedTypeSymbol, List<IMethodSymbol>>(SymbolEqualityComparer.Default);
 
             foreach (var candidate in receiver.Candidates)
@@ -921,7 +937,8 @@ namespace SourceGenerator
 
                 var owner = method.ContainingType;
 
-                if (owner == null || owner.ContainingNamespace?.ToDisplayString() != BridgeNamespace)
+                if (owner == null ||
+                    Array.IndexOf(BridgeNamespaces, owner.ContainingNamespace?.ToDisplayString()) < 0)
                 {
                     continue;
                 }
@@ -938,7 +955,8 @@ namespace SourceGenerator
 
             foreach (var pair in byType)
             {
-                Context.AddSource($"{pair.Key.Name}.LibraryBridge.g.cs", EmitBridges(pair.Key, pair.Value));
+                Context.AddSource($"{pair.Key.ContainingNamespace?.ToDisplayString()}.{pair.Key.Name}.LibraryBridge.g.cs",
+                    EmitBridges(pair.Key, pair.Value));
             }
         }
 
@@ -946,18 +964,22 @@ namespace SourceGenerator
         {
             var builder = new StringBuilder();
 
+            var containingNamespace = InOwner.ContainingNamespace?.ToDisplayString() ?? BridgeNamespaces[1];
+
             builder.AppendLine("// <auto-generated/> LibraryBridgeGenerator -- do not edit.");
             builder.AppendLine("#if LEANCLR");
             builder.AppendLine("using System.Runtime.InteropServices;");
             builder.AppendLine("#endif");
             builder.AppendLine();
-            builder.AppendLine($"namespace {BridgeNamespace}");
+            builder.AppendLine($"namespace {containingNamespace}");
             builder.AppendLine("{");
             builder.AppendLine(
                 $"    {(InOwner.DeclaredAccessibility == Accessibility.Public ? "public" : "internal")} static unsafe partial class {InOwner.Name}");
             builder.AppendLine("    {");
 
-            foreach (var method in InMethods.OrderBy(Method => Method.Name, StringComparer.Ordinal))
+            foreach (var method in InMethods
+                         .OrderBy(Method => Method.Name, StringComparer.Ordinal)
+                         .ThenBy(Method => Method.Parameters.Length))
             {
                 var returnType = method.ReturnsVoid ? "void" : Qualify(method.ReturnType);
 
@@ -969,20 +991,33 @@ namespace SourceGenerator
                 var pointerType = string.Join(", ", method.Parameters
                     .Select(Parameter => Qualify(Parameter.Type)).Concat(new[] { returnType }));
 
-                var key = $"{BridgeNamespace}.{InOwner.Name}::{method.Name.Substring(2)}";
+                var bare = method.Name.StartsWith("__", StringComparison.Ordinal)
+                    ? method.Name.Substring(2)
+                    : method.Name;
+
+                var key = $"{containingNamespace}.{InOwner.Name}::{bare}";
+
+                // Keeps the slot field name the binding generator used to emit, so the Mono/CoreCLR
+                // metadata of the generated proxies stays exactly as it was.
+                var slot = method.Name.StartsWith("__", StringComparison.Ordinal)
+                    ? $"{method.Name}_Slot"
+                    : $"__{method.Name}";
+
+                var accessibility = method.DeclaredAccessibility == Accessibility.Public ? "public" : "private";
 
                 builder.AppendLine("#if LEANCLR");
                 builder.AppendLine(
                     $"        [DllImport(\"{NativeModuleName}\", CallingConvention = CallingConvention.Cdecl)]");
                 builder.AppendLine(
-                    $"        private static extern unsafe partial {returnType} {method.Name}({parameters});");
+                    $"        {accessibility} static extern unsafe partial {returnType} {method.Name}({parameters});");
                 builder.AppendLine("#else");
-                builder.AppendLine($"        private static nint {method.Name}_Slot;");
+                builder.AppendLine($"        private static nint {slot};");
                 builder.AppendLine();
-                builder.AppendLine($"        private static unsafe partial {returnType} {method.Name}({parameters}) =>");
+                builder.AppendLine(
+                    $"        {accessibility} static unsafe partial {returnType} {method.Name}({parameters}) =>");
                 builder.AppendLine(
                     $"            ((delegate* unmanaged[Cdecl]<{pointerType}>)global::Interop.MethodBridge.Resolve(");
-                builder.AppendLine($"                ref {method.Name}_Slot, \"{key}\"))({arguments});");
+                builder.AppendLine($"                ref {slot}, \"{key}\"))({arguments});");
                 builder.AppendLine("#endif");
                 builder.AppendLine();
             }
@@ -1012,14 +1047,9 @@ namespace SourceGenerator
                 return;
             }
 
-            // A bridge declaration is: partial, static, bodyless, and named with the "__" prefix that
-            // FLeanCLRDomain::RegisterPInvokes registers an alias for.
+            // A bridge declaration is: partial, static and bodyless. Which of those are ours is decided
+            // in Execute, where the semantic model can see the namespace and the class attributes.
             if (methodDeclarationSyntax.Body != null || methodDeclarationSyntax.ExpressionBody != null)
-            {
-                return;
-            }
-
-            if (methodDeclarationSyntax.Identifier.ValueText.StartsWith("__", StringComparison.Ordinal) == false)
             {
                 return;
             }

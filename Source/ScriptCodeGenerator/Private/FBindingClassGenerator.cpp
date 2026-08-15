@@ -755,13 +755,6 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 
 	auto ClassImplementationContent = BINDING_COMBINE_CLASS_IMPLEMENTATION(ClassContent);
 
-	// The LeanCLR interpreter cannot issue an unmanaged calli through a raw native pointer, so its
-	// bindings are emitted as named [DllImport]s instead, and the host registers each one as a
-	// P/Invoke keyed by the C# declaration's full name (see FLeanCLRDomain::RegisterPInvokes).
-	// Option A (backend-aware): only the LeanCLR target changes shape -- Mono/CoreCLR keep calli, so
-	// they carry no regression from this.
-	const auto bLeanCLR = FUnrealCSharpFunctionLibrary::GetScriptDomainType() == EScriptDomainType::LeanCLR;
-
 	FString FunctionContent;
 
 	auto GetFunctionDeclaration = [&](
@@ -773,41 +766,6 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 	{
 		const auto bIsConstructor = InType != TEXT("nint");
 
-		const auto MethodName = FString::Printf(TEXT(
-			"__%s"),
-		                                        *InMethodName
-		);
-
-		FString ParamType;
-
-		if (!InParam.IsEmpty())
-		{
-			TArray<FString> Params;
-
-			InParam.ParseIntoArray(Params, TEXT(", "));
-
-			TArray<FString> Type;
-
-			for (const auto& Param : Params)
-			{
-				int32 LastSpace = INDEX_NONE;
-
-				Param.FindLastChar(TEXT(' '), LastSpace);
-
-				Type.Add(LastSpace != INDEX_NONE
-					         ? Param.Left(LastSpace).TrimEnd()
-					         : Param);
-			}
-
-			ParamType = FString::Join(Type, TEXT(", ")) + TEXT(", ");
-		}
-
-		const auto Signature = FString::Printf(TEXT(
-			"delegate* unmanaged[Cdecl]<nint, %svoid>"
-		),
-		                                       *ParamType
-		);
-
 		auto ObjectParam = FString(TEXT("InObject"));
 
 		if (bIsConstructor)
@@ -815,86 +773,57 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 			ObjectParam = TEXT("HandleData.Alloc(InObject)");
 		}
 
-		if (bLeanCLR)
+		// One backend-independent shape for every binding: declare the raw bridge once as a partial
+		// method and let LibraryBridgeGenerator (Script/SourceGenerator) emit the implementation --
+		// [DllImport] extern under LEANCLR, a function pointer resolved through MethodBridge.Resolve
+		// otherwise. Nothing emitted from here depends on the backend any more, so the generated proxies
+		// are byte-identical for all three and switching backends no longer requires regenerating them
+		// (which is what cost 106 proxy types once before). The resolve key the generator derives is
+		// "<namespace>.<class>::<method>", built from the very same two strings used below for the
+		// file's namespace and class declaration, so it cannot drift from this file.
+		if (bIsConstructor)
 		{
 			// Constructor: the InObject -> handle conversion (HandleData.Alloc) has to survive, so the
-			// binding is split into a private extern(nint, ...) -- named InMethodName so it still
-			// matches the registration key -- plus a same-named wrapper that takes the object itself.
+			// binding is split into a private bridge taking (nint, ...) -- named InMethodName so it
+			// still matches the registration key -- plus a same-named wrapper taking the object itself.
 			//
 			// The two overloads cannot collide, by construction rather than by luck: bIsConstructor is
 			// DEFINED above as InType != "nint", so reaching this branch is itself proof that the
-			// wrapper's first parameter type differs from the extern's nint. (Measured on the emitted
+			// wrapper's first parameter type differs from the bridge's nint. (Measured on the emitted
 			// output: 94 such pairs, 36 distinct wrapper types, "nint" among them zero times.)
-			if (bIsConstructor)
-			{
-				return FString::Printf(TEXT(
-					"\t\t[DllImport(\"__UnrealCSharpLeanCLR\", CallingConvention = CallingConvention.Cdecl)]\n"
-					"\t\tprivate static extern unsafe void %s(nint InObject%s%s);\n"
-					"\n"
-					"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
-					"\t\t{\n"
-					"\t\t\t%s(%s%s%s);\n"
-					"\t\t}\n"
-				),
-				                       *InMethodName,
-				                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
-				                       *InParam,
-				                       *InMethodName,
-				                       *InType,
-				                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
-				                       *InParam,
-				                       *InMethodName,
-				                       *ObjectParam,
-				                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
-				                       *InReturn
-				);
-			}
-
-			// Non-constructor (including property and subscript get/set): the public method is itself
-			// the extern, and its name is InMethodName. Its first parameter prints as nint because
-			// InType is exactly "nint" on this path -- that is the same equality bIsConstructor was
-			// derived from -- so the emitted signature (nint InObject, <InParam>) matches the native
-			// side without a wrapper.
 			return FString::Printf(TEXT(
-				"\t\t[DllImport(\"__UnrealCSharpLeanCLR\", CallingConvention = CallingConvention.Cdecl)]\n"
-				"\t\tpublic static extern unsafe void %s(%s InObject%s%s);\n"
+				"\t\tprivate static unsafe partial void %s(nint InObject%s%s);\n"
+				"\n"
+				"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
+				"\t\t{\n"
+				"\t\t\t%s(%s%s%s);\n"
+				"\t\t}\n"
 			),
+			                       *InMethodName,
+			                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
+			                       *InParam,
 			                       *InMethodName,
 			                       *InType,
 			                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
-			                       *InParam
+			                       *InParam,
+			                       *InMethodName,
+			                       *ObjectParam,
+			                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
+			                       *InReturn
 			);
 		}
 
-		// Mono/CoreCLR: the binding is a raw native pointer that has to be resolved on first use.
-		// The slot is nint rather than the function pointer type so the "resolve once, retry on miss"
-		// rule can live in MethodBridge.Resolve instead of being re-emitted at every single binding
-		// (P8.14). Same reason as the hand-written Script/UE/Library bridges (P8.8), except those need
-		// a property because their method bodies are shared between the two backends -- here the
-		// generator emits different text per backend, so a property would only add one getter per
-		// binding for nothing. The function pointer expression is still evaluated before the
-		// arguments, so a constructor's HandleData.Alloc(InObject) runs after the resolve, as before.
+		// Non-constructor (including property and subscript get/set): the public method IS the bridge,
+		// so it is the partial declaration itself and no wrapper is emitted. Its first parameter prints
+		// as nint because InType is exactly "nint" on this path -- the same equality bIsConstructor was
+		// derived from -- so the signature (nint InObject, <InParam>) matches the native side directly.
 		return FString::Printf(TEXT(
-			"\t\tprivate static nint %s;\n"
-			"\n"
-			"\t\tpublic static unsafe void %s(%s InObject%s%s)\n"
-			"\t\t{\n"
-			"\t\t\t((%s)MethodBridge.Resolve(ref %s, \"%s.%s::%s\"))(%s%s%s);\n"
-			"\t\t}\n"
+			"\t\tpublic static unsafe partial void %s(%s InObject%s%s);\n"
 		),
-		                       *MethodName,
 		                       *InMethodName,
 		                       *InType,
 		                       !InParam.IsEmpty() ? TEXT(", ") : TEXT(""),
-		                       *InParam,
-		                       *Signature,
-		                       *MethodName,
-		                       *ImplementationNameSpaceContent,
-		                       *ClassImplementationContent,
-		                       *InMethodName,
-		                       *ObjectParam,
-		                       !InReturn.IsEmpty() ? TEXT(", ") : TEXT(""),
-		                       *InReturn
+		                       *InParam
 		);
 	};
 
@@ -1061,11 +990,6 @@ void FBindingClassGenerator::GeneratorImplementation(const FBindingClass* InClas
 	}
 
 	UsingNameSpaceContent += TEXT("using Interop;\n");
-
-	if (bLeanCLR)
-	{
-		UsingNameSpaceContent += TEXT("using System.Runtime.InteropServices;\n");
-	}
 
 	for (const auto& UsingNameSpace : UsingNameSpaces)
 	{
